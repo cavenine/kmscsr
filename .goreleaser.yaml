@@ -1,0 +1,109 @@
+# GoReleaser configuration for kmscsr
+version: 2
+
+before:
+  hooks:
+    # Ensure dependencies are up to date
+    - go mod tidy
+    # Run tests
+    - go test ./...
+
+builds:
+  - id: kmscsr
+    main: ./cmd/kmscsr
+    binary: kmscsr
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "6"
+      - "7"
+    ignore:
+      # Windows ARM builds are not commonly used
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: kmscsr
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    formats:
+      - tar.gz
+      - zip
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: cavenine
+    name: kmscsr
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## kmscsr {{ .Tag }} ({{ .Date }})
+    
+    Download binaries for your platform below.
+
+  footer: |
+    ## Installation
+
+    ### Binary Installation
+    Download the appropriate binary for your platform and add it to your PATH.
+
+    ### Go Install
+    ```bash
+    go install github.com/cavenine/kmscsr/cmd/kmscsr@{{ .Tag }}
+    ```
+
+    **Full Changelog**: https://github.com/cavenine/kmscsr/compare/{{ .PreviousTag }}...{{ .Tag }}
