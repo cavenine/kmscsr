@@ -10,7 +10,7 @@ import (
 
 func main() {
 	// Define the KMS key ARN
-	kmsArn := "arn:aws:kms:eu-west-1:xxxxxxxxxxxx:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+	kmsArn := "arn:aws:kms:us-east-1:xxxxxxxxxxxx:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 
 	// Create subject information
 	subject := &kmscsr.SubjectInfo{
