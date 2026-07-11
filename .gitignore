@@ -37,6 +37,7 @@ vendor/
 /bin/
 /dist/
 /build/
+/kmscsr
 
 # Environment files
 .env

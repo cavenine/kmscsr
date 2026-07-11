@@ -9,7 +9,7 @@ A Go library and CLI tool for creating and signing X.509 certificate signing req
 - Subject Alternative Names (DNS and IP addresses)
 - Configurable key usage and extended key usage extensions
 - Full support for CA and non-CA certificate requests
-- Pure Go implementation using Go 1.25
+- Pure Go implementation using Go 1.26
 - Command-line interface for easy CSR generation
 
 ## Installation
@@ -38,7 +38,7 @@ go build ./cmd/kmscsr
 
 - AWS SDK for Go v2 (`github.com/aws/aws-sdk-go-v2`)
 - Cobra CLI framework (`github.com/spf13/cobra`)
-- Go 1.25 or later
+- Go 1.26.5 or later
 
 ## Usage
 
@@ -98,10 +98,15 @@ kmscsr --kms-arn "arn:aws:kms:us-east-1:xxxx:key/yyyy" \
 - `--san-ip` - Subject Alternative Name IP addresses (can be specified multiple times)
 - `--ca` - Generate a CA certificate request
 - `-o, --output` - Output file path (default: stdout)
+- `--timeout` - Maximum time for AWS KMS operations (default: `30s`; `0` disables the timeout)
 
 ### Library Usage
 
 See [examples](example/main.go) for programmatic usage.
+
+For cancellable AWS operations, prefer `NewKMSCSRBuilderWithContext` and pass
+the same bounded context to `BuildWithKMS`. The legacy `NewKMSCSRBuilder`
+constructor remains available for compatibility.
 
 ## AWS Configuration
 
