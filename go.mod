@@ -1,6 +1,6 @@
 module github.com/cavenine/kmscsr
 
-go 1.25.5
+go 1.26.5
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.3

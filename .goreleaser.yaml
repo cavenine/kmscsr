@@ -3,10 +3,14 @@ version: 2
 
 before:
   hooks:
-    # Ensure dependencies are up to date
-    - go mod tidy
+    # Verify dependencies without mutating the release worktree
+    - go mod tidy -diff
+    - go mod verify
+    - go vet ./...
     # Run tests
     - go test ./...
+    # Reject releases with reachable known vulnerabilities
+    - go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
 builds:
   - id: kmscsr

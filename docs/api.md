@@ -32,7 +32,7 @@ The main builder type for creating CSRs with KMS signing.
 type Builder struct {
     Subject           *pkix.Name                // Subject DN information
     KMSArn            string                    // AWS KMS Key ARN
-    HashAlgo          types.SigningAlgorithmSpec // Hash algorithm
+    HashAlgo          types.SigningAlgorithmSpec // Complete KMS signing algorithm
     CA                bool                      // Is this a CA certificate request
     SubjectAltDomains []string                  // DNS names for SAN extension
     SubjectAltIPs     []net.IP                  // IP addresses for SAN extension
@@ -73,6 +73,23 @@ builder, err := kmscsr.NewKMSCSRBuilder(subject, kmsArn)
 if err != nil {
     log.Fatal(err)
 }
+```
+
+### `NewKMSCSRBuilderWithContext`
+
+Creates a new CSR builder while applying cancellation and deadlines to AWS
+configuration loading and KMS public-key retrieval. Prefer this constructor in
+servers and command-line applications.
+
+```go
+func NewKMSCSRBuilderWithContext(ctx context.Context, subject *SubjectInfo, kmsArn string) (*Builder, error)
+```
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+builder, err := kmscsr.NewKMSCSRBuilderWithContext(ctx, subject, kmsArn)
 ```
 
 ### `PEMEncode`
@@ -117,6 +134,14 @@ func (b *Builder) SetCA(isCA bool)
 ```go
 builder.SetCA(true)  // Configure as CA certificate
 ```
+
+### Signing algorithm selection
+
+`Builder.HashAlgo` is retained for API compatibility but represents a complete
+AWS KMS `SigningAlgorithmSpec`, such as
+`types.SigningAlgorithmSpecRsassaPkcs1V15Sha384`. The selected algorithm must be
+advertised by the KMS key and compatible with its public key. Unsupported or
+incompatible values cause `BuildWithKMS` to return an error.
 
 ### `BuildWithKMS`
 
@@ -164,6 +189,7 @@ The library supports standard X.509 key usage flags:
 - `x509.ExtKeyUsageEmailProtection`
 - `x509.ExtKeyUsageTimeStamping`
 - `x509.ExtKeyUsageOCSPSigning`
+- `x509.ExtKeyUsageAny`
 
 ## Complete Example
 
@@ -175,6 +201,7 @@ import (
     "log"
     "net"
     "os"
+    "time"
 
     "github.com/cavenine/kmscsr"
 )
@@ -191,7 +218,10 @@ func main() {
         CommonName:             "example.com",
     }
 
-    builder, err := kmscsr.NewKMSCSRBuilder(subject, kmsArn)
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    builder, err := kmscsr.NewKMSCSRBuilderWithContext(ctx, subject, kmsArn)
     if err != nil {
         log.Fatal(err)
     }
@@ -201,7 +231,6 @@ func main() {
     builder.SubjectAltIPs = []net.IP{net.ParseIP("192.168.1.1")}
 
     // Build and sign the CSR
-    ctx := context.Background()
     csrDER, err := builder.BuildWithKMS(ctx)
     if err != nil {
         log.Fatal(err)
