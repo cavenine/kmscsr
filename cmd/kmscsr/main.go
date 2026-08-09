@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -18,19 +19,89 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
-// Build information. GoReleaser overwrites these at link time via -X; the
-// defaults are what a plain "go build" or "go install" produces.
+// Sentinel values marking metadata the linker did not supply.
+const (
+	defaultVersion = "dev"
+	defaultCommit  = "none"
+	defaultDate    = "unknown"
+)
+
+// Build settings the Go toolchain stamps into a binary, and the module version
+// it reports for a build that is not from a released version.
+const (
+	vcsRevisionKey = "vcs.revision"
+	vcsTimeKey     = "vcs.time"
+	vcsModifiedKey = "vcs.modified"
+	develVersion   = "(devel)"
+)
+
+// Build information, overwritten at link time by GoReleaser via -X.
 //
 //nolint:gochecknoglobals // linker-injected build metadata must be package level
 var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
+	version = defaultVersion
+	commit  = defaultCommit
+	date    = defaultDate
 )
+
+// buildMetadata describes the build that produced this binary.
+type buildMetadata struct {
+	version string
+	commit  string
+	date    string
+}
+
+func (b buildMetadata) String() string {
+	return fmt.Sprintf("kmscsr %s (commit %s, built %s, %s)", b.version, b.commit, b.date, runtime.Version())
+}
+
+// resolve fills in fields the linker left at their defaults. Only GoReleaser
+// passes -X, so `go install pkg@version` and `go build` would otherwise report
+// nothing useful. For those the toolchain still stamps the binary: the module
+// version for a versioned install, and the VCS revision and time when building
+// from a source tree.
+func (b buildMetadata) resolve(info *debug.BuildInfo, ok bool) buildMetadata {
+	if !ok || info == nil {
+		return b
+	}
+
+	// "(devel)" is what an unversioned local build reports, which says less
+	// than the sentinel it would replace.
+	if b.version == defaultVersion && info.Main.Version != "" && info.Main.Version != develVersion {
+		b.version = info.Main.Version
+	}
+
+	var revision, buildTime string
+	var dirty bool
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case vcsRevisionKey:
+			revision = setting.Value
+		case vcsTimeKey:
+			buildTime = setting.Value
+		case vcsModifiedKey:
+			dirty = setting.Value == "true"
+		}
+	}
+
+	if b.commit == defaultCommit && revision != "" {
+		b.commit = revision
+		if dirty {
+			b.commit += "-dirty"
+		}
+	}
+	if b.date == defaultDate && buildTime != "" {
+		b.date = buildTime
+	}
+
+	return b
+}
 
 // versionString renders the build metadata for the --version flag.
 func versionString() string {
-	return fmt.Sprintf("kmscsr %s (commit %s, built %s, %s)", version, commit, date, runtime.Version())
+	return buildMetadata{version: version, commit: commit, date: date}.
+		resolve(debug.ReadBuildInfo()).
+		String()
 }
 
 // builderFactory constructs the CSR builder for a run. Tests substitute one

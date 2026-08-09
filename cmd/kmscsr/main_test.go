@@ -6,7 +6,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -30,14 +34,137 @@ func TestParseIPAddressesRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestVersionStringIncludesBuildMetadata(t *testing.T) {
-	// GoReleaser injects these with -X, which the linker silently ignores if
-	// the symbols are missing. Assert they reach the output.
-	actual := versionString()
-	for _, want := range []string{version, commit, date, runtime.Version()} {
+func TestBuildMetadataResolve(t *testing.T) {
+	defaults := buildMetadata{version: defaultVersion, commit: defaultCommit, date: defaultDate}
+	linked := buildMetadata{version: "v9.9.9", commit: "linkercommit", date: "linkerdate"}
+
+	vcsInfo := &debug.BuildInfo{
+		Main: debug.Module{Version: develVersion},
+		Settings: []debug.BuildSetting{
+			{Key: vcsRevisionKey, Value: "abc123"},
+			{Key: vcsTimeKey, Value: "2026-08-09T00:00:00Z"},
+			{Key: vcsModifiedKey, Value: "false"},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		start   buildMetadata
+		info    *debug.BuildInfo
+		ok      bool
+		want    buildMetadata
+		comment string
+	}{
+		{
+			name:    "no build info leaves defaults",
+			start:   defaults,
+			ok:      false,
+			want:    defaults,
+			comment: "nothing to fall back to",
+		},
+		{
+			name:    "nil build info leaves defaults",
+			start:   defaults,
+			info:    nil,
+			ok:      true,
+			want:    defaults,
+			comment: "ok is true but the pointer is nil",
+		},
+		{
+			name:  "module version fills in for go install",
+			start: defaults,
+			info: &debug.BuildInfo{
+				Main: debug.Module{Version: "v0.1.0"},
+			},
+			ok:      true,
+			want:    buildMetadata{version: "v0.1.0", commit: defaultCommit, date: defaultDate},
+			comment: "this is the go install pkg@version path",
+		},
+		{
+			name:    "devel module version is not used",
+			start:   defaults,
+			info:    &debug.BuildInfo{Main: debug.Module{Version: develVersion}},
+			ok:      true,
+			want:    defaults,
+			comment: "(devel) says less than the sentinel",
+		},
+		{
+			name:    "vcs stamp fills commit and date",
+			start:   defaults,
+			info:    vcsInfo,
+			ok:      true,
+			want:    buildMetadata{version: defaultVersion, commit: "abc123", date: "2026-08-09T00:00:00Z"},
+			comment: "this is the go build from a source tree path",
+		},
+		{
+			name:  "dirty tree is marked",
+			start: defaults,
+			info: &debug.BuildInfo{
+				Settings: []debug.BuildSetting{
+					{Key: vcsRevisionKey, Value: "abc123"},
+					{Key: vcsModifiedKey, Value: "true"},
+				},
+			},
+			ok:      true,
+			want:    buildMetadata{version: defaultVersion, commit: "abc123-dirty", date: defaultDate},
+			comment: "uncommitted changes must be visible",
+		},
+		{
+			name:    "linker values win over build info",
+			start:   linked,
+			info:    vcsInfo,
+			ok:      true,
+			want:    linked,
+			comment: "GoReleaser is authoritative when it sets -X",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if actual := tt.start.resolve(tt.info, tt.ok); actual != tt.want {
+				t.Errorf("expected %+v, got %+v (%s)", tt.want, actual, tt.comment)
+			}
+		})
+	}
+}
+
+func TestBuildMetadataString(t *testing.T) {
+	actual := buildMetadata{version: "v1.2.3", commit: "deadbeef", date: "2026-01-01"}.String()
+	for _, want := range []string{"kmscsr", "v1.2.3", "deadbeef", "2026-01-01", runtime.Version()} {
 		if !strings.Contains(actual, want) {
 			t.Errorf("expected %q in version string, got: %s", want, actual)
 		}
+	}
+}
+
+// TestGoReleaserLdflagsMatchDeclaredVariables guards the failure that shipped
+// three releases with no build metadata: the linker silently discards -X for a
+// symbol it cannot find, so renaming a variable here would go unnoticed until
+// someone inspected a released binary.
+func TestGoReleaserLdflagsMatchDeclaredVariables(t *testing.T) {
+	config, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read goreleaser config: %v", err)
+	}
+
+	// Referencing the variables keeps this in step with the declarations.
+	declared := map[string]string{
+		"version": version,
+		"commit":  commit,
+		"date":    date,
+	}
+
+	matches := regexp.MustCompile(`-X main\.(\w+)=`).FindAllStringSubmatch(string(config), -1)
+	if len(matches) == 0 {
+		t.Fatal("no -X main.* ldflags found in .goreleaser.yaml")
+	}
+	for _, match := range matches {
+		if _, ok := declared[match[1]]; !ok {
+			t.Errorf("-X main.%s has no matching package variable; the linker will discard it", match[1])
+		}
+	}
+	if len(matches) != len(declared) {
+		t.Errorf("expected %d injected variables, .goreleaser.yaml has %d", len(declared), len(matches))
 	}
 }
 
