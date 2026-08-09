@@ -2,9 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.0] - 2026-08-09
 
 ### Added
+- `--version` flag on the CLI. The GoReleaser `-X main.version` ldflags had no
+  matching variables, so the linker silently discarded them and released
+  binaries carried no build metadata
 - `NewKMSCSRBuilderWithClient` for supplying a preconfigured KMS client
 - Validation of subject alternative names before signing: DNS entries must be
   non-empty and unpadded, IP addresses must be 4 or 16 bytes
@@ -35,6 +38,24 @@ All notable changes to this project will be documented in this file.
   a command construction failure exited silently
 - Key usage encoding no longer emits a bit string whose declared length
   contradicts its content when no usage bits are set
+
+## [0.0.2] - 2026-07-11
+
+Backfilled from [#1](https://github.com/cavenine/kmscsr/pull/1); this release
+shipped without a changelog entry.
+
+### Fixed
+- Corrected X.509 KeyUsage DER encoding, and added validation of signing
+  algorithms and extended key usages
+- Propagated cancellation and deadlines through AWS KMS operations, and bounded
+  CLI execution
+- Preserved all accepted subject attributes, and verified generated CSR
+  signatures before returning them
+
+### Security
+- Removed a stale checked-in binary
+- Pinned GitHub Actions to immutable SHAs, reduced workflow permissions, and
+  added vulnerability scanning to releases
 
 ## [0.0.1] - 2025-12-02
 

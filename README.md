@@ -99,6 +99,7 @@ kmscsr --kms-arn "arn:aws:kms:us-east-1:xxxx:key/yyyy" \
 - `--ca` - Generate a CA certificate request
 - `-o, --output` - Output file path (default: stdout)
 - `--timeout` - Maximum time for AWS KMS operations (default: `30s`; `0` disables the timeout)
+- `-v, --version` - Print version, commit, build date, and Go version
 
 ### Library Usage
 

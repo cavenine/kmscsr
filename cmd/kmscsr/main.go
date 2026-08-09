@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,21 @@ import (
 )
 
 const defaultTimeout = 30 * time.Second
+
+// Build information. GoReleaser overwrites these at link time via -X; the
+// defaults are what a plain "go build" or "go install" produces.
+//
+//nolint:gochecknoglobals // linker-injected build metadata must be package level
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// versionString renders the build metadata for the --version flag.
+func versionString() string {
+	return fmt.Sprintf("kmscsr %s (commit %s, built %s, %s)", version, commit, date, runtime.Version())
+}
 
 // builderFactory constructs the CSR builder for a run. Tests substitute one
 // backed by a fake KMS client so the command can be exercised without AWS.
@@ -79,7 +95,9 @@ subject alternative names, and configurable key usage extensions.`,
 		// main reports errors so that a failed run prints one line rather than
 		// cobra's message followed by the full usage text.
 		SilenceErrors: true,
+		Version:       versionString(),
 	}
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	// Required flags
 	rootCmd.Flags().StringVar(&options.kmsArn, "kms-arn", "", "AWS KMS key ARN (required)")
