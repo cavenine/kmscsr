@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,36 @@ func TestParseIPAddressesRejectsInvalidInput(t *testing.T) {
 	_, err := parseIPAddresses([]string{"not-an-ip"})
 	if err == nil || !strings.Contains(err.Error(), "invalid IP address") {
 		t.Fatalf("expected invalid IP address error, got: %v", err)
+	}
+}
+
+func TestVersionStringIncludesBuildMetadata(t *testing.T) {
+	// GoReleaser injects these with -X, which the linker silently ignores if
+	// the symbols are missing. Assert they reach the output.
+	actual := versionString()
+	for _, want := range []string{version, commit, date, runtime.Version()} {
+		if !strings.Contains(actual, want) {
+			t.Errorf("expected %q in version string, got: %s", want, actual)
+		}
+	}
+}
+
+func TestRootCommandVersionFlag(t *testing.T) {
+	command, err := newRootCommand()
+	if err != nil {
+		t.Fatalf("failed to create command: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(io.Discard)
+	command.SetArgs([]string{"--version"})
+
+	if execErr := command.ExecuteContext(context.Background()); execErr != nil {
+		t.Fatalf("unexpected error: %v", execErr)
+	}
+	if actual := strings.TrimSpace(stdout.String()); actual != versionString() {
+		t.Errorf("expected %q, got: %q", versionString(), actual)
 	}
 }
 
