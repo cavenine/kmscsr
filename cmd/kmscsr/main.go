@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,10 @@ import (
 )
 
 const defaultTimeout = 30 * time.Second
+
+// builderFactory constructs the CSR builder for a run. Tests substitute one
+// backed by a fake KMS client so the command can be exercised without AWS.
+type builderFactory func(ctx context.Context, subject *kmscsr.SubjectInfo, kmsArn string) (*kmscsr.Builder, error)
 
 type cliOptions struct {
 	kmsArn        string
@@ -36,10 +41,13 @@ type cliOptions struct {
 	isCA       bool
 	outputFile string
 	timeout    time.Duration
+
+	newBuilder builderFactory
 }
 
 func main() {
 	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
@@ -57,14 +65,20 @@ func run() error {
 }
 
 func newRootCommand() (*cobra.Command, error) {
-	options := &cliOptions{}
+	return newRootCommandWithOptions(&cliOptions{newBuilder: kmscsr.NewKMSCSRBuilderWithContext})
+}
+
+func newRootCommandWithOptions(options *cliOptions) (*cobra.Command, error) {
 	rootCmd := &cobra.Command{
 		Use:   "kmscsr",
 		Short: "Generate X.509 certificate signing requests using AWS KMS keys",
-		Long: `kmscsr is a CLI tool for creating and signing X.509 certificate signing 
+		Long: `kmscsr is a CLI tool for creating and signing X.509 certificate signing
 requests (CSRs) with AWS KMS keys. It supports RSA and ECDSA key types,
 subject alternative names, and configurable key usage extensions.`,
 		RunE: options.generateCSR,
+		// main reports errors so that a failed run prints one line rather than
+		// cobra's message followed by the full usage text.
+		SilenceErrors: true,
 	}
 
 	// Required flags
@@ -117,6 +131,19 @@ subject alternative names, and configurable key usage extensions.`,
 }
 
 func (o *cliOptions) generateCSR(cmd *cobra.Command, _ []string) error {
+	// Past flag parsing, a failure is an operational one; repeating the usage
+	// text buries the actual error.
+	cmd.SilenceUsage = true
+
+	// MarkFlagRequired only checks that a flag was supplied, so an explicitly
+	// empty value still reaches here.
+	if strings.TrimSpace(o.kmsArn) == "" {
+		return errors.New("--kms-arn cannot be empty")
+	}
+	if strings.TrimSpace(o.commonName) == "" {
+		return errors.New("--common-name cannot be empty")
+	}
+
 	ipAddresses, err := parseIPAddresses(o.sanIPs)
 	if err != nil {
 		return err
@@ -143,7 +170,7 @@ func (o *cliOptions) generateCSR(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create KMS CSR Builder
-	builder, err := kmscsr.NewKMSCSRBuilderWithContext(ctx, subject, o.kmsArn)
+	builder, err := o.newBuilder(ctx, subject, o.kmsArn)
 	if err != nil {
 		return fmt.Errorf("failed to create KMS CSR builder: %w", err)
 	}
@@ -176,9 +203,9 @@ func (o *cliOptions) generateCSR(cmd *cobra.Command, _ []string) error {
 		if writeErr := os.WriteFile(o.outputFile, csrPEM, 0600); writeErr != nil {
 			return fmt.Errorf("failed to write CSR to file: %w", writeErr)
 		}
-		fmt.Fprintf(os.Stderr, "CSR successfully created and saved to %s\n", o.outputFile)
+		fmt.Fprintf(cmd.ErrOrStderr(), "CSR successfully created and saved to %s\n", o.outputFile)
 	} else {
-		if _, writeErr := os.Stdout.Write(csrPEM); writeErr != nil {
+		if _, writeErr := cmd.OutOrStdout().Write(csrPEM); writeErr != nil {
 			return fmt.Errorf("failed to write CSR to stdout: %w", writeErr)
 		}
 	}

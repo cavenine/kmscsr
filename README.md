@@ -108,6 +108,23 @@ For cancellable AWS operations, prefer `NewKMSCSRBuilderWithContext` and pass
 the same bounded context to `BuildWithKMS`. The legacy `NewKMSCSRBuilder`
 constructor remains available for compatibility.
 
+To control the region, endpoint, or credentials of the KMS client yourself, use
+`NewKMSCSRBuilderWithClient` and pass any value satisfying the `KMSClient`
+interface.
+
+### Input Validation
+
+Requests that would encode into a malformed CSR are rejected before any signing
+call is made:
+
+- Subject fields must not contain control characters (such as NUL or a line
+  break), which downstream certificate tooling may truncate or misparse.
+- The email address must contain only ASCII characters.
+- Subject alternative DNS names must be non-empty, ASCII-only, and free of
+  leading or trailing whitespace. Supply internationalized names in A-label
+  form.
+- Subject alternative IP addresses must be 4-byte or 16-byte addresses.
+
 ## AWS Configuration
 
 Make sure your AWS credentials are configured. The library uses the AWS SDK's default credential chain:
@@ -133,7 +150,9 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Documentation
 
-See [API Documentation](docs/api.md) for detailed API reference.
+- [API Documentation](docs/api.md) — detailed API reference
+- [End-to-End Testing](docs/e2e-testing.md) — results of the last run against
+  real AWS KMS, and how to repeat it
 
 ## Version
 

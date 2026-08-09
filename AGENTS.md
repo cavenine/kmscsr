@@ -6,13 +6,15 @@
 - Run tests with coverage: `go test -cover ./...`
 - Run single test: `go test -v -run TestName`
 - Run specific package tests: `go test -v ./path/to/package`
-- Lint: `go vet ./...`
+- Vet: `go vet ./...`
+- Lint: `go tool golangci-lint run ./...` (version pinned by the `tool` directive in `go.mod`)
 - Format: `go fmt ./...`
+- Apply fixers: `go fix ./...` (use `go fix -diff ./...` to preview)
 - Tidy dependencies: `go mod tidy`
 - Run example: `go run example/main.go`
 
 ## Code Style
-- **Go Version**: Go 1.25+
+- **Go Version**: Go 1.26+
 - **Formatting**: Use `gofmt` standard formatting (enforced); tabs for indentation
 - **Naming**: Follow Go conventions (camelCase for private, PascalCase for exported)
 - **Errors**: Return errors, don't panic; wrap errors with context using `fmt.Errorf` with `%w`

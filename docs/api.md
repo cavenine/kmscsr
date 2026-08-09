@@ -92,6 +92,36 @@ defer cancel()
 builder, err := kmscsr.NewKMSCSRBuilderWithContext(ctx, subject, kmsArn)
 ```
 
+### `NewKMSCSRBuilderWithClient`
+
+Creates a new CSR builder that signs with a caller-supplied KMS client instead
+of one constructed from the ambient AWS configuration. Use it to control the
+region, endpoint, or credentials of the client, or to substitute a fake in
+tests.
+
+```go
+func NewKMSCSRBuilderWithClient(ctx context.Context, subject *SubjectInfo, kmsArn string, kmsClient KMSClient) (*Builder, error)
+```
+
+`KMSClient` is satisfied by `*kms.Client` and by any type providing
+`GetPublicKey` and `Sign`:
+
+```go
+type KMSClient interface {
+    GetPublicKey(ctx context.Context, params *kms.GetPublicKeyInput, optFns ...func(*kms.Options)) (*kms.GetPublicKeyOutput, error)
+    Sign(ctx context.Context, params *kms.SignInput, optFns ...func(*kms.Options)) (*kms.SignOutput, error)
+}
+```
+
+```go
+cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("eu-west-1"))
+if err != nil {
+    log.Fatal(err)
+}
+
+builder, err := kmscsr.NewKMSCSRBuilderWithClient(ctx, subject, kmsArn, kms.NewFromConfig(cfg))
+```
+
 ### `PEMEncode`
 
 Encodes a DER-formatted CSR into PEM format.
@@ -242,6 +272,43 @@ func main() {
 }
 ```
 
+## Generated Extensions
+
+Every request carries a basic constraints extension, and the remaining
+extensions appear when the corresponding builder field is set. Criticality
+follows RFC 5280.
+
+| Extension | OID | When present | Critical |
+| --- | --- | --- | --- |
+| Basic Constraints | 2.5.29.19 | Always (`cA=TRUE` after `SetCA(true)`, otherwise `cA=FALSE`) | Only when `cA=TRUE` |
+| Key Usage | 2.5.29.15 | `KeyUsage != 0` | Yes |
+| Extended Key Usage | 2.5.29.37 | `len(ExtKeyUsage) > 0` | No |
+| Subject Alternative Name | 2.5.29.17 | Any `SubjectAltDomains` or `SubjectAltIPs` | Only when the subject is empty (RFC 5280 §4.2.1.6) |
+
+A default non-CA request therefore contains basic constraints (`cA=FALSE`), key
+usage (`digitalSignature`, `keyEncipherment`), and extended key usage
+(`serverAuth`, `clientAuth`) — matching the
+[csrbuilder](https://github.com/wbond/csrbuilder) reference implementation this
+library was rewritten from.
+
+## Input Validation
+
+The library rejects inputs that would encode into a malformed CSR. Subject
+validation happens at construction; subject alternative name validation happens
+at the start of `BuildWithKMS`, before any signing call is made.
+
+| Input | Rule |
+| --- | --- |
+| Any subject field | Must not contain control characters (NUL, line breaks, and similar), which downstream certificate tooling may truncate or misparse |
+| `EmailAddress` | Must contain only ASCII characters, as it is encoded as an `IA5String` |
+| `SubjectAltDomains` entries | Must be non-empty, ASCII-only, and free of leading or trailing whitespace |
+| `SubjectAltIPs` entries | Must be 4-byte or 16-byte addresses |
+| `KeyUsage` | Must set at least one of the nine supported bits and no others |
+| `ExtKeyUsage` | Must contain only the supported usages listed above |
+
+Non-ASCII characters are accepted in subject fields other than the email
+address, so names such as `Müller GmbH` round-trip correctly.
+
 ## Error Handling
 
 The library returns descriptive errors for common failure scenarios:
@@ -251,6 +318,11 @@ The library returns descriptive errors for common failure scenarios:
 - AWS authentication failures
 - KMS signing failures
 - Invalid subject information
+- Malformed subject alternative names
 - Certificate request creation errors
+
+`BuildWithKMS` additionally re-parses and verifies the signature of every CSR it
+produces, so a successful return means the request is well-formed and correctly
+signed by the KMS key.
 
 Always check errors returned by functions and methods.

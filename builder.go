@@ -15,6 +15,7 @@ import (
 	"math/bits"
 	"net"
 	"slices"
+	"strings"
 	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -65,8 +66,6 @@ type Builder struct {
 	// Internal fields
 	kmsClient                  KMSClient
 	publicKey                  crypto.PublicKey
-	signAlgo                   types.SigningAlgorithmSpec
-	keySpec                    types.KeySpec
 	supportedSigningAlgorithms []types.SigningAlgorithmSpec
 }
 
@@ -103,6 +102,18 @@ func NewKMSCSRBuilderWithContext(ctx context.Context, subject *SubjectInfo, kmsA
 
 	kmsClient := kms.NewFromConfig(cfg)
 
+	return newKMSCSRBuilder(ctx, subject, kmsArn, kmsClient)
+}
+
+// NewKMSCSRBuilderWithClient creates a new CSR builder that signs with the
+// supplied KMS client instead of one built from the ambient AWS configuration.
+// Use it to control the region, endpoint, or credentials of the KMS client.
+func NewKMSCSRBuilderWithClient(
+	ctx context.Context,
+	subject *SubjectInfo,
+	kmsArn string,
+	kmsClient KMSClient,
+) (*Builder, error) {
 	return newKMSCSRBuilder(ctx, subject, kmsArn, kmsClient)
 }
 
@@ -152,6 +163,34 @@ func validateBuilderInputs(ctx context.Context, subject *SubjectInfo, kmsArn str
 	for _, char := range subject.EmailAddress {
 		if char > unicode.MaxASCII {
 			return errors.New("email address must contain only ASCII characters")
+		}
+	}
+
+	return validateSubjectFields(subject)
+}
+
+// validateSubjectFields rejects control characters anywhere in the subject.
+// An embedded NUL or line break is silently truncated or misparsed by common
+// certificate tooling, so a distinguished name carrying one cannot be trusted
+// to mean the same thing to the requester and to the issuing CA.
+func validateSubjectFields(subject *SubjectInfo) error {
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"country name", subject.CountryName},
+		{"state or province name", subject.StateOrProvinceName},
+		{"locality name", subject.LocalityName},
+		{"organization name", subject.OrganizationName},
+		{"common name", subject.CommonName},
+		{"organizational unit name", subject.OrganizationalUnitName},
+		{"email address", subject.EmailAddress},
+		{"street address", subject.StreetAddress},
+		{"postal code", subject.PostalCode},
+	}
+	for _, field := range fields {
+		if strings.ContainsFunc(field.value, unicode.IsControl) {
+			return fmt.Errorf("%s must not contain control characters", field.name)
 		}
 	}
 
@@ -209,8 +248,6 @@ func (b *Builder) loadPublicKey(ctx context.Context) error {
 		return fmt.Errorf("KMS key must have SIGN_VERIFY usage, got: %v", output.KeyUsage)
 	}
 
-	// Store key spec and determine signing algorithm
-	b.keySpec = output.KeySpec
 	b.supportedSigningAlgorithms = append([]types.SigningAlgorithmSpec(nil), output.SigningAlgorithms...)
 
 	// Parse the public key
@@ -222,20 +259,13 @@ func (b *Builder) loadPublicKey(ctx context.Context) error {
 	b.publicKey = pubKey
 
 	// Determine an appropriate default that KMS explicitly advertises.
-	b.signAlgo, err = defaultSigningAlgorithm(pubKey, b.supportedSigningAlgorithms)
+	b.HashAlgo, err = defaultSigningAlgorithm(pubKey, b.supportedSigningAlgorithms)
 	if err != nil {
 		return err
 	}
-	b.HashAlgo = b.signAlgo
 
-	// Set default key usage based on CA setting
-	if b.CA {
-		b.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
-		b.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}
-	} else {
-		b.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
-		b.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
-	}
+	// Apply the key usage defaults matching the current CA setting.
+	b.SetCA(b.CA)
 
 	return nil
 }
@@ -260,6 +290,9 @@ func (b *Builder) BuildWithKMS(ctx context.Context) ([]byte, error) {
 	if b.Subject == nil {
 		return nil, errors.New("subject cannot be nil")
 	}
+	if err := validateSubjectAltNames(b.SubjectAltDomains, b.SubjectAltIPs); err != nil {
+		return nil, err
+	}
 
 	signAlgo, signatureAlgorithm, err := b.resolveSigningAlgorithm()
 	if err != nil {
@@ -272,40 +305,47 @@ func (b *Builder) BuildWithKMS(ctx context.Context) ([]byte, error) {
 		SignatureAlgorithm: signatureAlgorithm,
 	}
 
-	// Add SAN extension if domains or IPs are specified
-	if len(b.SubjectAltDomains) > 0 || len(b.SubjectAltIPs) > 0 {
-		template.DNSNames = b.SubjectAltDomains
-		template.IPAddresses = b.SubjectAltIPs
-	}
-
 	// Add extensions
 	var extensions []pkix.Extension
 
-	// Basic Constraints
-	if b.CA {
-		basicConstraints, extensionErr := basicConstraintsExtension(true)
-		if extensionErr != nil {
-			return nil, fmt.Errorf("failed to create basic constraints extension: %w", extensionErr)
-		}
-		extensions = append(extensions, basicConstraints)
+	// Basic Constraints. The extension is always requested, so that a non-CA
+	// request states cA=FALSE rather than leaving it to the issuer to infer.
+	basicConstraints, constraintsErr := basicConstraintsExtension(b.CA)
+	if constraintsErr != nil {
+		return nil, fmt.Errorf("failed to create basic constraints extension: %w", constraintsErr)
 	}
+	extensions = append(extensions, basicConstraints)
 
 	// Key Usage
 	if b.KeyUsage != 0 {
-		keyUsageExt, extensionErr := keyUsageExtension(b.KeyUsage)
-		if extensionErr != nil {
-			return nil, fmt.Errorf("failed to create key usage extension: %w", extensionErr)
+		keyUsageExt, keyUsageErr := keyUsageExtension(b.KeyUsage)
+		if keyUsageErr != nil {
+			return nil, fmt.Errorf("failed to create key usage extension: %w", keyUsageErr)
 		}
 		extensions = append(extensions, keyUsageExt)
 	}
 
 	// Extended Key Usage
 	if len(b.ExtKeyUsage) > 0 {
-		extKeyUsageExt, extensionErr := extKeyUsageExtension(b.ExtKeyUsage)
-		if extensionErr != nil {
-			return nil, fmt.Errorf("failed to create extended key usage extension: %w", extensionErr)
+		extKeyUsageExt, extUsageErr := extKeyUsageExtension(b.ExtKeyUsage)
+		if extUsageErr != nil {
+			return nil, fmt.Errorf("failed to create extended key usage extension: %w", extUsageErr)
 		}
 		extensions = append(extensions, extKeyUsageExt)
+	}
+
+	// Subject Alternative Name. Built here rather than through the template's
+	// DNSNames and IPAddresses fields so that criticality follows RFC 5280.
+	if len(b.SubjectAltDomains) > 0 || len(b.SubjectAltIPs) > 0 {
+		sanExt, sanErr := subjectAltNameExtension(
+			b.SubjectAltDomains,
+			b.SubjectAltIPs,
+			subjectIsEmpty(b.Subject),
+		)
+		if sanErr != nil {
+			return nil, fmt.Errorf("failed to create subject alternative name extension: %w", sanErr)
+		}
+		extensions = append(extensions, sanExt)
 	}
 
 	template.ExtraExtensions = extensions
@@ -331,6 +371,87 @@ func (b *Builder) BuildWithKMS(ctx context.Context) ([]byte, error) {
 	}
 
 	return csrDER, nil
+}
+
+// GeneralName choice tags from RFC 5280 section 4.2.1.6.
+const (
+	nameTypeDNSName   = 2
+	nameTypeIPAddress = 7
+)
+
+// subjectAltNameExtension builds the subject alternative name extension.
+// RFC 5280 section 4.2.1.6 requires the extension to be critical when the
+// subject is empty, because it then carries the request's only identity.
+func subjectAltNameExtension(domains []string, ips []net.IP, critical bool) (pkix.Extension, error) {
+	rawValues := make([]asn1.RawValue, 0, len(domains)+len(ips))
+	for _, domain := range domains {
+		rawValues = append(rawValues, asn1.RawValue{
+			Class: asn1.ClassContextSpecific,
+			Tag:   nameTypeDNSName,
+			Bytes: []byte(domain),
+		})
+	}
+	for _, ip := range ips {
+		// Prefer the 4-byte form so IPv4 addresses do not encode as
+		// IPv4-mapped IPv6, which parsers compare unequal.
+		encoded := ip.To4()
+		if encoded == nil {
+			encoded = ip.To16()
+		}
+		rawValues = append(rawValues, asn1.RawValue{
+			Class: asn1.ClassContextSpecific,
+			Tag:   nameTypeIPAddress,
+			Bytes: encoded,
+		})
+	}
+
+	val, err := asn1.Marshal(rawValues)
+	if err != nil {
+		return pkix.Extension{}, err
+	}
+
+	return pkix.Extension{
+		Id:       asn1.ObjectIdentifier{2, 5, 29, 17},
+		Critical: critical,
+		Value:    val,
+	}, nil
+}
+
+// subjectIsEmpty reports whether the subject encodes to an empty distinguished
+// name, which is the condition RFC 5280 attaches the critical SAN rule to.
+func subjectIsEmpty(name *pkix.Name) bool {
+	return name == nil || len(name.ToRDNSequence()) == 0
+}
+
+// validateSubjectAltNames rejects SAN entries that encode into a malformed
+// extension. It runs before the KMS signing request so a bad entry fails with a
+// message naming it, rather than surfacing afterwards as an opaque parse failure
+// of the generated request.
+func validateSubjectAltNames(domains []string, ips []net.IP) error {
+	for _, domain := range domains {
+		if strings.TrimSpace(domain) == "" {
+			return errors.New("subject alternative DNS name cannot be empty")
+		}
+		if domain != strings.TrimSpace(domain) {
+			return fmt.Errorf("subject alternative DNS name %q has leading or trailing whitespace", domain)
+		}
+		// dNSName is an IA5String, so it cannot carry non-ASCII runes.
+		// Internationalized names must be supplied in their A-label form.
+		for _, char := range domain {
+			if char > unicode.MaxASCII {
+				return fmt.Errorf("subject alternative DNS name %q must contain only ASCII characters", domain)
+			}
+		}
+	}
+	for _, ip := range ips {
+		// To16 reports nil for any address that is neither 4 nor 16 bytes,
+		// which is exactly the set x509 cannot encode.
+		if ip.To16() == nil {
+			return fmt.Errorf("invalid subject alternative IP address of length %d", len(ip))
+		}
+	}
+
+	return nil
 }
 
 // PEMEncode encodes the CSR in PEM format.
@@ -406,6 +527,11 @@ func keyUsageExtension(usage x509.KeyUsage) (pkix.Extension, error) {
 	const supportedKeyUsage = x509.KeyUsage(0x1ff)
 	if usage&^supportedKeyUsage != 0 {
 		return pkix.Extension{}, fmt.Errorf("unsupported key usage bits: %#x", usage&^supportedKeyUsage)
+	}
+	// RFC 5280 requires at least one bit to be set, and an all-zero usage would
+	// encode as a BIT STRING whose declared length contradicts its content.
+	if usage == 0 {
+		return pkix.Extension{}, errors.New("key usage must set at least one bit")
 	}
 
 	usageValue := uint16(usage) //nolint:gosec // the supported-bit mask above proves this conversion is lossless

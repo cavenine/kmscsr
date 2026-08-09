@@ -211,6 +211,8 @@ func TestNewKMSCSRBuilder_Success(t *testing.T) {
 
 	if builder == nil {
 		t.Fatal("expected builder to be non-nil")
+
+		return
 	}
 
 	if builder.Subject.CommonName != "test.example.com" {
@@ -592,6 +594,7 @@ func TestBuildWithKMS_PropagatesCancellationToSign(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	buildDone := make(chan error, 1)
 	go func() {
 		_, buildErr := builder.BuildWithKMS(ctx)
@@ -864,6 +867,8 @@ func TestPEMEncode(t *testing.T) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
 		t.Fatal("failed to decode PEM block")
+
+		return
 	}
 
 	if block.Type != "CERTIFICATE REQUEST" {
