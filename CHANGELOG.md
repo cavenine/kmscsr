@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Binaries built with `go install` or `go build` reported `dev`/`none`/`unknown`,
+  because only GoReleaser passes the `-X` ldflags. Build metadata now falls back
+  to `runtime/debug.ReadBuildInfo`, so `go install pkg@version` reports the
+  module version and a source-tree build reports the VCS revision, timestamp,
+  and dirty state
+
 ## [0.1.0] - 2026-08-09
 
 ### Added
