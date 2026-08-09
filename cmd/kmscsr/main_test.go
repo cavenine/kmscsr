@@ -73,6 +73,8 @@ func TestRootCommandHasBoundedDefaultTimeout(t *testing.T) {
 	flag := command.Flags().Lookup("timeout")
 	if flag == nil {
 		t.Fatal("timeout flag not found")
+
+		return
 	}
 	parsed, err := time.ParseDuration(flag.DefValue)
 	if err != nil {
