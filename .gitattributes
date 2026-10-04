@@ -1,0 +1,2 @@
+# Go tooling (gofmt, goimports, golangci-lint) requires LF line endings.
+* text=auto eol=lf

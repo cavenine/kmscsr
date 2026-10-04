@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -17,6 +15,8 @@ import (
 )
 
 func TestParseIPAddresses(t *testing.T) {
+	t.Parallel()
+
 	addresses, err := parseIPAddresses([]string{" 192.0.2.1 ", "2001:db8::1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -28,13 +28,42 @@ func TestParseIPAddresses(t *testing.T) {
 }
 
 func TestParseIPAddressesRejectsInvalidInput(t *testing.T) {
-	_, err := parseIPAddresses([]string{"not-an-ip"})
-	if err == nil || !strings.Contains(err.Error(), "invalid IP address") {
-		t.Fatalf("expected invalid IP address error, got: %v", err)
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"hostname", "not-an-ip"},
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"CIDR notation", "192.0.2.0/24"},
+		{"octet out of range", "256.0.2.1"},
+		{"too few octets", "192.0.2"},
+		{"IPv6 zone", "fe80::1%eth0"},
+		{"bracketed IPv6", "[2001:db8::1]"},
+		{"address with port", "192.0.2.1:443"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A valid address first shows one bad entry fails the whole list.
+			addresses, err := parseIPAddresses([]string{"192.0.2.1", tt.value})
+			if err == nil || err.Error() != "invalid IP address: "+tt.value {
+				t.Fatalf("expected the error to name %q, got: %v", tt.value, err)
+			}
+			if addresses != nil {
+				t.Errorf("expected no addresses alongside the error, got: %#v", addresses)
+			}
+		})
 	}
 }
 
 func TestBuildMetadataResolve(t *testing.T) {
+	t.Parallel()
+
 	defaults := buildMetadata{version: defaultVersion, commit: defaultCommit, date: defaultDate}
 	linked := buildMetadata{version: "v9.9.9", commit: "linkercommit", date: "linkerdate"}
 
@@ -121,6 +150,8 @@ func TestBuildMetadataResolve(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if actual := tt.start.resolve(tt.info, tt.ok); actual != tt.want {
 				t.Errorf("expected %+v, got %+v (%s)", tt.want, actual, tt.comment)
 			}
@@ -129,6 +160,8 @@ func TestBuildMetadataResolve(t *testing.T) {
 }
 
 func TestBuildMetadataString(t *testing.T) {
+	t.Parallel()
+
 	actual := buildMetadata{version: "v1.2.3", commit: "deadbeef", date: "2026-01-01"}.String()
 	for _, want := range []string{"kmscsr", "v1.2.3", "deadbeef", "2026-01-01", runtime.Version()} {
 		if !strings.Contains(actual, want) {
@@ -142,6 +175,8 @@ func TestBuildMetadataString(t *testing.T) {
 // symbol it cannot find, so renaming a variable here would go unnoticed until
 // someone inspected a released binary.
 func TestGoReleaserLdflagsMatchDeclaredVariables(t *testing.T) {
+	t.Parallel()
+
 	config, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yaml"))
 	if err != nil {
 		t.Fatalf("failed to read goreleaser config: %v", err)
@@ -169,25 +204,24 @@ func TestGoReleaserLdflagsMatchDeclaredVariables(t *testing.T) {
 }
 
 func TestRootCommandVersionFlag(t *testing.T) {
-	command, err := newRootCommand()
+	t.Parallel()
+
+	// --version needs none of the required flags and must not reach AWS.
+	stdout, stderr, err := executeWith(t, unusedFactory(t), "--version")
 	if err != nil {
-		t.Fatalf("failed to create command: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	var stdout bytes.Buffer
-	command.SetOut(&stdout)
-	command.SetErr(io.Discard)
-	command.SetArgs([]string{"--version"})
-
-	if execErr := command.ExecuteContext(context.Background()); execErr != nil {
-		t.Fatalf("unexpected error: %v", execErr)
+	if expected := versionString() + "\n"; stdout != expected {
+		t.Errorf("expected exactly %q, got: %q", expected, stdout)
 	}
-	if actual := strings.TrimSpace(stdout.String()); actual != versionString() {
-		t.Errorf("expected %q, got: %q", versionString(), actual)
+	if stderr != "" {
+		t.Errorf("expected nothing on stderr, got: %q", stderr)
 	}
 }
 
 func TestRootCommandRequiresKMSArn(t *testing.T) {
+	t.Parallel()
+
 	command, err := newRootCommand()
 	if err != nil {
 		t.Fatalf("failed to create command: %v", err)
@@ -203,28 +237,52 @@ func TestRootCommandRequiresKMSArn(t *testing.T) {
 }
 
 func TestRootCommandRejectsInvalidIPBeforeAWS(t *testing.T) {
-	command, err := newRootCommand()
-	if err != nil {
-		t.Fatalf("failed to create command: %v", err)
-	}
-	command.SetOut(io.Discard)
-	command.SetErr(io.Discard)
-	command.SetArgs([]string{
-		"--kms-arn", "arn:aws:kms:us-east-1:123456789012:key/test-key-id",
-		"--common-name", "example.com",
-		"--san-ip", "invalid",
-	})
+	t.Parallel()
 
-	err = command.ExecuteContext(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "invalid IP address") {
+	// unusedFactory fails the test if the builder, and so AWS, is reached.
+	_, _, err := executeWith(t, unusedFactory(t),
+		"--kms-arn", testARN,
+		"--common-name", "example.com",
+		"--san-ip", "192.0.2.1",
+		"--san-ip", "invalid",
+	)
+	if err == nil || err.Error() != "invalid IP address: invalid" {
 		t.Fatalf("expected invalid IP address error, got: %v", err)
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("unexpected AWS request: %v", err)
+}
+
+// TestRootCommandRejectsPositionalArgs guards against a repeated value being
+// silently dropped: cobra otherwise treats the second name below as an ignored
+// positional argument and signs a request without it.
+func TestRootCommandRejectsPositionalArgs(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := executeWith(t, unusedFactory(t),
+		"--kms-arn", testARN,
+		"--common-name", "example.com",
+		"--san-dns", "a.example.com", "b.example.com",
+	)
+	if err == nil || !strings.Contains(err.Error(), "b.example.com") {
+		t.Fatalf("expected an error naming the stray argument, got: %v", err)
+	}
+}
+
+func TestRootCommandRejectsNegativeTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := executeWith(t, unusedFactory(t),
+		"--kms-arn", testARN,
+		"--common-name", "example.com",
+		"--timeout", "-1s",
+	)
+	if err == nil || !strings.Contains(err.Error(), "--timeout cannot be negative") {
+		t.Fatalf("expected negative timeout error, got: %v", err)
 	}
 }
 
 func TestRootCommandHasBoundedDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
 	command, err := newRootCommand()
 	if err != nil {
 		t.Fatalf("failed to create command: %v", err)

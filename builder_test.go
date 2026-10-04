@@ -1,6 +1,7 @@
 package kmscsr //nolint:testpackage // testing internals
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -63,30 +64,39 @@ func (m *mockKMSClient) Sign(_ context.Context, _ *kms.SignInput, _ ...func(*kms
 
 // mockSigningKMSClient implements a mock KMS client that performs real signing.
 type mockSigningKMSClient struct {
-	publicKey       []byte
-	keyUsage        types.KeyUsageType
-	keySpec         types.KeySpec
-	signAlgo        types.SigningAlgorithmSpec
-	signer          crypto.Signer
-	getPublicKeyErr error
-	signErr         error
-	signInput       *kms.SignInput
+	publicKey []byte
+	keyUsage  types.KeyUsageType
+	keySpec   types.KeySpec
+	signAlgo  types.SigningAlgorithmSpec
+	// signingAlgorithms, when set, is advertised instead of signAlgo alone.
+	signingAlgorithms []types.SigningAlgorithmSpec
+	signer            crypto.Signer
+	getPublicKeyErr   error
+	signErr           error
+	getPublicKeyInput *kms.GetPublicKeyInput
+	signInput         *kms.SignInput
 }
 
 func (m *mockSigningKMSClient) GetPublicKey(
 	_ context.Context,
-	_ *kms.GetPublicKeyInput,
+	params *kms.GetPublicKeyInput,
 	_ ...func(*kms.Options),
 ) (*kms.GetPublicKeyOutput, error) {
 	if m.getPublicKeyErr != nil {
 		return nil, m.getPublicKeyErr
 	}
 
+	m.getPublicKeyInput = params
+	algorithms := m.signingAlgorithms
+	if algorithms == nil {
+		algorithms = []types.SigningAlgorithmSpec{m.signAlgo}
+	}
+
 	return &kms.GetPublicKeyOutput{
 		PublicKey:         m.publicKey,
 		KeyUsage:          m.keyUsage,
 		KeySpec:           m.keySpec,
-		SigningAlgorithms: []types.SigningAlgorithmSpec{m.signAlgo},
+		SigningAlgorithms: algorithms,
 	}, nil
 }
 
@@ -181,6 +191,8 @@ func generateMockECDSAPublicKey() ([]byte, *ecdsa.PrivateKey, error) {
 }
 
 func TestNewKMSCSRBuilder_Success(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -229,6 +241,8 @@ func TestNewKMSCSRBuilder_Success(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilder_NilSubject(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewKMSCSRBuilder(nil, "arn:aws:kms:us-east-1:123456789012:key/test-key-id")
 	if err == nil {
 		t.Fatal("expected error for nil subject, got nil")
@@ -240,6 +254,8 @@ func TestNewKMSCSRBuilder_NilSubject(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilder_EmptyKMSArn(t *testing.T) {
+	t.Parallel()
+
 	subject := &SubjectInfo{
 		CommonName: "test.example.com",
 	}
@@ -255,6 +271,8 @@ func TestNewKMSCSRBuilder_EmptyKMSArn(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilderWithContext_Canceled(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -270,6 +288,8 @@ func TestNewKMSCSRBuilderWithContext_Canceled(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilderWithContext_NilContext(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewKMSCSRBuilderWithContext(
 		nil, //nolint:staticcheck // explicitly verifies rejection of a nil context
 		&SubjectInfo{CommonName: "test.example.com"},
@@ -281,6 +301,8 @@ func TestNewKMSCSRBuilderWithContext_NilContext(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilder_RejectsEmptyKMSResponse(t *testing.T) {
+	t.Parallel()
+
 	_, err := newKMSCSRBuilderWithMock(
 		&SubjectInfo{CommonName: "test.example.com"},
 		"arn:aws:kms:us-east-1:123456789012:key/test-key-id",
@@ -292,6 +314,8 @@ func TestNewKMSCSRBuilder_RejectsEmptyKMSResponse(t *testing.T) {
 }
 
 func TestSetCA(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -340,6 +364,8 @@ func TestSetCA(t *testing.T) {
 }
 
 func TestBuildWithKMS_RSA(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -395,23 +421,46 @@ func TestBuildWithKMS_RSA(t *testing.T) {
 		t.Errorf("expected CommonName 'rsa-test.example.com', got: %s", csr.Subject.CommonName)
 	}
 
-	if len(csr.DNSNames) != 2 {
-		t.Errorf("expected 2 DNS names, got: %d", len(csr.DNSNames))
+	if len(csr.DNSNames) != 2 || csr.DNSNames[0] != "www.example.com" || csr.DNSNames[1] != "api.example.com" {
+		t.Errorf("expected DNS names in the order given, got: %#v", csr.DNSNames)
 	}
 
-	// Verify public key type
-	if _, ok := csr.PublicKey.(*rsa.PublicKey); !ok {
-		t.Errorf("expected RSA public key, got: %T", csr.PublicKey)
+	if !privateKey.PublicKey.Equal(csr.PublicKey) {
+		t.Errorf("public key in CSR does not match the KMS key, got: %T", csr.PublicKey)
 	}
 
-	// Compare public keys
-	csrPubKey, ok := csr.PublicKey.(*rsa.PublicKey)
-	if ok && csrPubKey.N.Cmp(privateKey.PublicKey.N) != 0 {
-		t.Error("public key in CSR does not match expected public key")
+	assertSignInput(t, mockClient.signInput, types.SigningAlgorithmSpecRsassaPkcs1V15Sha256, crypto.SHA256)
+}
+
+// assertSignInput checks the request BuildWithKMS sent to KMS Sign. KMS hashes
+// the message itself unless told it is already a digest, so a wrong MessageType
+// still yields a signature, just over the wrong data; the mocks cannot notice
+// that, only a real key can.
+func assertSignInput(t *testing.T, input *kms.SignInput, algo types.SigningAlgorithmSpec, hash crypto.Hash) {
+	t.Helper()
+
+	if input == nil {
+		t.Fatal("KMS Sign was not called")
+
+		return
+	}
+	if input.KeyId == nil || *input.KeyId != testARN {
+		t.Errorf("expected KeyId %q, got: %v", testARN, input.KeyId)
+	}
+	if input.MessageType != types.MessageTypeDigest {
+		t.Errorf("expected MessageType %s, got: %q", types.MessageTypeDigest, input.MessageType)
+	}
+	if input.SigningAlgorithm != algo {
+		t.Errorf("expected SigningAlgorithm %s, got: %s", algo, input.SigningAlgorithm)
+	}
+	if len(input.Message) != hash.Size() {
+		t.Errorf("expected a %d-byte %v digest, got %d bytes", hash.Size(), hash, len(input.Message))
 	}
 }
 
 func TestBuildWithKMS_ECDSA(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockECDSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -470,6 +519,8 @@ func TestBuildWithKMS_ECDSA(t *testing.T) {
 }
 
 func TestBuildWithKMS_WithCAExtensions(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -521,6 +572,8 @@ func TestBuildWithKMS_WithCAExtensions(t *testing.T) {
 }
 
 func TestBuildWithKMS_KeyUsageEncoding(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -553,27 +606,55 @@ func TestBuildWithKMS_KeyUsageEncoding(t *testing.T) {
 	assertCSRKeyUsage(t, csr, x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment)
 }
 
+// TestKeyUsageExtension_AllSupportedBits checks every non-empty combination of
+// the nine defined bits, byte for byte, against the encoding crypto/x509 itself
+// produces. DER requires trailing zero bits to be dropped from a named bit
+// list, which decoding alone would not notice.
 func TestKeyUsageExtension_AllSupportedBits(t *testing.T) {
-	for bit := range 9 {
-		expected := x509.KeyUsage(1 << uint(bit))
-		extension, err := keyUsageExtension(expected)
+	t.Parallel()
+
+	_, key := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
+	const allKeyUsages = x509.KeyUsage(1<<9 - 1)
+
+	for usage := x509.KeyUsage(1); usage <= allKeyUsages; usage++ {
+		extension, err := keyUsageExtension(usage)
 		if err != nil {
-			t.Fatalf("bit %d: unexpected error: %v", bit, err)
+			t.Fatalf("usage %#x: unexpected error: %v", usage, err)
 		}
-		actual := decodeKeyUsage(t, extension.Value)
-		if actual != expected {
-			t.Fatalf("bit %d: expected %v, got: %v", bit, expected, actual)
+		if actual := decodeKeyUsage(t, extension.Value); actual != usage {
+			t.Fatalf("usage %#x: decoded as %#x", usage, actual)
+		}
+		reference := stdlibCertificateExtension(t, key, &x509.Certificate{KeyUsage: usage}, oidKeyUsage())
+		if !bytes.Equal(extension.Value, reference.Value) || extension.Critical != reference.Critical {
+			t.Fatalf("usage %#x: got %x (critical=%v), crypto/x509 encodes %x (critical=%v)",
+				usage, extension.Value, extension.Critical, reference.Value, reference.Critical)
 		}
 	}
 }
 
 func TestKeyUsageExtension_RejectsUnsupportedBits(t *testing.T) {
-	if _, extensionErr := keyUsageExtension(x509.KeyUsage(1 << 9)); extensionErr == nil {
-		t.Fatal("expected unsupported key usage error")
+	t.Parallel()
+
+	// The exact message matters: x509.KeyUsage implements fmt.Stringer, so
+	// formatting it with %x hex-encodes "KeyUsage(512)" instead of the bits.
+	tests := []struct {
+		usage   x509.KeyUsage
+		wantErr string
+	}{
+		{x509.KeyUsage(1 << 9), "unsupported key usage bits: 0x200"},
+		{x509.KeyUsageDigitalSignature | x509.KeyUsage(1<<15), "unsupported key usage bits: 0x8000"},
+	}
+
+	for _, tt := range tests {
+		if _, err := keyUsageExtension(tt.usage); err == nil || err.Error() != tt.wantErr {
+			t.Errorf("usage %d: expected %q, got: %v", uint16(tt.usage), tt.wantErr, err)
+		}
 	}
 }
 
 func TestBuildWithKMS_PropagatesCancellationToSign(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -622,47 +703,72 @@ func TestBuildWithKMS_PropagatesCancellationToSign(t *testing.T) {
 }
 
 func TestBuildWithKMS_UsesConfiguredSigningAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
 	}
-
-	client := &mockSigningKMSClient{
-		publicKey: publicKeyDER,
-		keyUsage:  types.KeyUsageTypeSignVerify,
-		keySpec:   types.KeySpecRsa2048,
-		signAlgo:  types.SigningAlgorithmSpecRsassaPkcs1V15Sha384,
-		signer:    privateKey,
-	}
-	builder, err := newKMSCSRBuilderWithMock(
-		&SubjectInfo{CommonName: "sha384-test.example.com"},
-		"arn:aws:kms:us-east-1:123456789012:key/test-key-id",
-		client,
-	)
-	if err != nil {
-		t.Fatalf("failed to create builder: %v", err)
-	}
-	builder.HashAlgo = types.SigningAlgorithmSpecRsassaPkcs1V15Sha384
-
-	csrDER, err := builder.BuildWithKMS(context.Background())
-	if err != nil {
-		t.Fatalf("failed to build CSR: %v", err)
-	}
-	if client.signInput == nil ||
-		client.signInput.SigningAlgorithm != types.SigningAlgorithmSpecRsassaPkcs1V15Sha384 {
-		t.Fatalf("expected KMS RSA SHA-384 signing input, got: %#v", client.signInput)
+	advertised := []types.SigningAlgorithmSpec{
+		types.SigningAlgorithmSpecRsassaPkcs1V15Sha256,
+		types.SigningAlgorithmSpecRsassaPkcs1V15Sha384,
+		types.SigningAlgorithmSpecRsassaPkcs1V15Sha512,
 	}
 
-	csr, err := x509.ParseCertificateRequest(csrDER)
-	if err != nil {
-		t.Fatalf("failed to parse CSR: %v", err)
+	tests := []struct {
+		algo     types.SigningAlgorithmSpec
+		hash     crypto.Hash
+		expected x509.SignatureAlgorithm
+	}{
+		{types.SigningAlgorithmSpecRsassaPkcs1V15Sha256, crypto.SHA256, x509.SHA256WithRSA},
+		{types.SigningAlgorithmSpecRsassaPkcs1V15Sha384, crypto.SHA384, x509.SHA384WithRSA},
+		{types.SigningAlgorithmSpecRsassaPkcs1V15Sha512, crypto.SHA512, x509.SHA512WithRSA},
 	}
-	if csr.SignatureAlgorithm != x509.SHA384WithRSA {
-		t.Fatalf("expected SHA384WithRSA, got: %v", csr.SignatureAlgorithm)
+
+	for _, tt := range tests {
+		t.Run(string(tt.algo), func(t *testing.T) {
+			t.Parallel()
+
+			client := &mockSigningKMSClient{
+				publicKey:         publicKeyDER,
+				keyUsage:          types.KeyUsageTypeSignVerify,
+				keySpec:           types.KeySpecRsa2048,
+				signingAlgorithms: advertised,
+				signer:            privateKey,
+			}
+			builder, builderErr := newKMSCSRBuilderWithMock(
+				&SubjectInfo{CommonName: "algo.example.com"},
+				testARN,
+				client,
+			)
+			if builderErr != nil {
+				t.Fatalf("failed to create builder: %v", builderErr)
+			}
+			builder.HashAlgo = tt.algo
+
+			csrDER, buildErr := builder.BuildWithKMS(t.Context())
+			if buildErr != nil {
+				t.Fatalf("failed to build CSR: %v", buildErr)
+			}
+			assertSignInput(t, client.signInput, tt.algo, tt.hash)
+
+			csr, parseErr := x509.ParseCertificateRequest(csrDER)
+			if parseErr != nil {
+				t.Fatalf("failed to parse CSR: %v", parseErr)
+			}
+			if csr.SignatureAlgorithm != tt.expected {
+				t.Fatalf("expected %v, got: %v", tt.expected, csr.SignatureAlgorithm)
+			}
+			if signatureErr := csr.CheckSignature(); signatureErr != nil {
+				t.Fatalf("signature verification failed: %v", signatureErr)
+			}
+		})
 	}
 }
 
 func TestBuildWithKMS_RejectsUnsupportedSigningAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -684,12 +790,16 @@ func TestBuildWithKMS_RejectsUnsupportedSigningAlgorithm(t *testing.T) {
 	}
 	builder.HashAlgo = types.SigningAlgorithmSpec("UNSUPPORTED")
 
-	if _, buildErr := builder.BuildWithKMS(context.Background()); buildErr == nil {
-		t.Fatal("expected unsupported signing algorithm error")
+	_, buildErr := builder.BuildWithKMS(t.Context())
+	if buildErr == nil || buildErr.Error() != "KMS key does not support signing algorithm UNSUPPORTED" {
+		t.Fatalf("expected unsupported signing algorithm error, got: %v", buildErr)
 	}
+	assertSignNotCalled(t, builder)
 }
 
 func TestBuildWithKMS_RejectsUnsupportedExtKeyUsage(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -709,14 +819,19 @@ func TestBuildWithKMS_RejectsUnsupportedExtKeyUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create builder: %v", err)
 	}
-	builder.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsage(999)}
+	builder.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsage(999)}
 
-	if _, buildErr := builder.BuildWithKMS(context.Background()); buildErr == nil {
-		t.Fatal("expected unsupported extended key usage error")
+	_, buildErr := builder.BuildWithKMS(t.Context())
+	if buildErr == nil || buildErr.Error() !=
+		"failed to create extended key usage extension: unsupported extended key usage: 999" {
+		t.Fatalf("expected unsupported extended key usage error, got: %v", buildErr)
 	}
+	assertSignNotCalled(t, builder)
 }
 
 func TestExtKeyUsageExtension_SupportsAny(t *testing.T) {
+	t.Parallel()
+
 	extension, err := extKeyUsageExtension([]x509.ExtKeyUsage{x509.ExtKeyUsageAny})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -733,6 +848,8 @@ func TestExtKeyUsageExtension_SupportsAny(t *testing.T) {
 }
 
 func TestBuildWithKMS_RejectsEmptyKMSSignature(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -759,6 +876,8 @@ func TestBuildWithKMS_RejectsEmptyKMSSignature(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilder_SubjectRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -855,6 +974,8 @@ func decodeKeyUsage(t *testing.T, der []byte) x509.KeyUsage {
 }
 
 func TestPEMEncode(t *testing.T) {
+	t.Parallel()
+
 	testData := []byte("test-csr-der-data")
 
 	pemData := PEMEncode(testData)
@@ -881,6 +1002,8 @@ func TestPEMEncode(t *testing.T) {
 }
 
 func TestGetSignatureAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		algo     types.SigningAlgorithmSpec
@@ -896,6 +1019,8 @@ func TestGetSignatureAlgorithm(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result, err := getSignatureAlgorithm(tt.algo)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)

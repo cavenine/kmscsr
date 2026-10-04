@@ -13,8 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cavenine/kmscsr"
 	"github.com/spf13/cobra"
+
+	"github.com/cavenine/kmscsr"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -163,6 +164,10 @@ func newRootCommandWithOptions(options *cliOptions) (*cobra.Command, error) {
 requests (CSRs) with AWS KMS keys. It supports RSA and ECDSA key types,
 subject alternative names, and configurable key usage extensions.`,
 		RunE: options.generateCSR,
+		// Without this, cobra accepts and ignores positional arguments, so a
+		// value such as the second name in "--san-dns a.example b.example"
+		// would be silently dropped from the request.
+		Args: cobra.NoArgs,
 		// main reports errors so that a failed run prints one line rather than
 		// cobra's message followed by the full usage text.
 		SilenceErrors: true,
@@ -231,6 +236,9 @@ func (o *cliOptions) generateCSR(cmd *cobra.Command, _ []string) error {
 	}
 	if strings.TrimSpace(o.commonName) == "" {
 		return errors.New("--common-name cannot be empty")
+	}
+	if o.timeout < 0 {
+		return fmt.Errorf("--timeout cannot be negative, got %s (use 0 to disable the timeout)", o.timeout)
 	}
 
 	ipAddresses, err := parseIPAddresses(o.sanIPs)

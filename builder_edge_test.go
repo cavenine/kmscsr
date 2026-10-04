@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
 	"net"
@@ -21,7 +22,7 @@ import (
 const testARN = "arn:aws:kms:us-east-1:123456789012:key/test-key-id"
 
 // generateMockECDSAPublicKeyOnCurve builds a DER public key and signer for curve.
-func generateMockECDSAPublicKeyOnCurve(t *testing.T, curve elliptic.Curve) ([]byte, *ecdsa.PrivateKey) {
+func generateMockECDSAPublicKeyOnCurve(t testing.TB, curve elliptic.Curve) ([]byte, *ecdsa.PrivateKey) {
 	t.Helper()
 
 	privateKey, err := ecdsa.GenerateKey(curve, rand.Reader)
@@ -38,7 +39,7 @@ func generateMockECDSAPublicKeyOnCurve(t *testing.T, curve elliptic.Curve) ([]by
 
 // newSigningBuilder returns a builder backed by a KMS mock that really signs.
 func newSigningBuilder(
-	t *testing.T,
+	t testing.TB,
 	subject *SubjectInfo,
 	publicKeyDER []byte,
 	keySpec types.KeySpec,
@@ -80,7 +81,49 @@ func newRSASigningBuilder(t *testing.T, subject *SubjectInfo) *Builder {
 	)
 }
 
+// newECDSASigningBuilder returns a builder over a freshly generated P-256 key,
+// which is much cheaper to generate than an RSA key.
+func newECDSASigningBuilder(t testing.TB, subject *SubjectInfo) *Builder {
+	t.Helper()
+
+	publicKeyDER, privateKey := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
+
+	return newSigningBuilder(
+		t,
+		subject,
+		publicKeyDER,
+		types.KeySpecEccNistP256,
+		types.SigningAlgorithmSpecEcdsaSha256,
+		privateKey,
+	)
+}
+
+// recordedSignInput returns the Sign request captured by the builder's KMS
+// mock, or nil if Sign was never called.
+func recordedSignInput(t *testing.T, builder *Builder) *kms.SignInput {
+	t.Helper()
+
+	client, ok := builder.kmsClient.(*mockSigningKMSClient)
+	if !ok {
+		t.Fatalf("builder does not use a recording KMS mock: %T", builder.kmsClient)
+	}
+
+	return client.signInput
+}
+
+// assertSignNotCalled fails the test if a request reached KMS Sign. Input that
+// is going to be rejected must be rejected before anything is signed.
+func assertSignNotCalled(t *testing.T, builder *Builder) {
+	t.Helper()
+
+	if input := recordedSignInput(t, builder); input != nil {
+		t.Errorf("KMS Sign was called for a request that should have been rejected: %#v", input)
+	}
+}
+
 func TestNewKMSCSRBuilder_NilClient(t *testing.T) {
+	t.Parallel()
+
 	_, err := newKMSCSRBuilder(t.Context(), &SubjectInfo{CommonName: "test.example.com"}, testARN, nil)
 	if err == nil || err.Error() != "KMS client cannot be nil" {
 		t.Fatalf("expected nil client error, got: %v", err)
@@ -88,6 +131,8 @@ func TestNewKMSCSRBuilder_NilClient(t *testing.T) {
 }
 
 func TestNewKMSCSRBuilderWithClient(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -116,12 +161,14 @@ func TestNewKMSCSRBuilderWithClient(t *testing.T) {
 
 	if _, nilSubjectErr := NewKMSCSRBuilderWithClient(
 		t.Context(), nil, testARN, &mockKMSClient{},
-	); nilSubjectErr == nil {
-		t.Fatal("expected nil subject error")
+	); nilSubjectErr == nil || nilSubjectErr.Error() != "subject cannot be nil" {
+		t.Fatalf("expected nil subject error, got: %v", nilSubjectErr)
 	}
 }
 
 func TestBuildWithKMS_ReportsKeyUsageExtensionFailure(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 	builder.KeyUsage = x509.KeyUsage(1 << 15)
 
@@ -132,6 +179,8 @@ func TestBuildWithKMS_ReportsKeyUsageExtensionFailure(t *testing.T) {
 }
 
 func TestResolveSigningAlgorithm_UnmappableAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 	// Advertised by KMS but deliberately unimplemented here.
 	builder.HashAlgo = types.SigningAlgorithmSpecRsassaPssSha256
@@ -144,6 +193,8 @@ func TestResolveSigningAlgorithm_UnmappableAlgorithm(t *testing.T) {
 }
 
 func TestValidateBuilderInputs_RejectsNonASCIIEmail(t *testing.T) {
+	t.Parallel()
+
 	err := validateBuilderInputs(t.Context(), &SubjectInfo{EmailAddress: "admin@exämple.com"}, testARN)
 	if err == nil || !strings.Contains(err.Error(), "ASCII") {
 		t.Fatalf("expected non-ASCII email error, got: %v", err)
@@ -151,6 +202,8 @@ func TestValidateBuilderInputs_RejectsNonASCIIEmail(t *testing.T) {
 }
 
 func TestValidateBuilderInputs_RejectsControlCharacters(t *testing.T) {
+	t.Parallel()
+
 	// field is both the subtest name and the label expected in the error.
 	tests := []struct {
 		field   string
@@ -169,6 +222,8 @@ func TestValidateBuilderInputs_RejectsControlCharacters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {
+			t.Parallel()
+
 			err := validateBuilderInputs(t.Context(), &tt.subject, testARN)
 			if err == nil || !strings.Contains(err.Error(), tt.field) {
 				t.Fatalf("expected %s control character error, got: %v", tt.field, err)
@@ -177,7 +232,35 @@ func TestValidateBuilderInputs_RejectsControlCharacters(t *testing.T) {
 	}
 }
 
+// TestValidateBuilderInputs_RejectsInvalidUTF8 checks that malformed UTF-8 is
+// rejected at construction, before the GetPublicKey call, rather than only
+// when BuildWithKMS fails to encode the subject.
+func TestValidateBuilderInputs_RejectsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		field   string
+		subject SubjectInfo
+	}{
+		{"common name", SubjectInfo{CommonName: "example\xff.com"}},
+		{"organization name", SubjectInfo{CommonName: "example.com", OrganizationName: "Acme\xc3"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateBuilderInputs(t.Context(), &tt.subject, testARN)
+			if want := tt.field + " must be valid UTF-8"; err == nil || err.Error() != want {
+				t.Fatalf("expected %q, got: %v", want, err)
+			}
+		})
+	}
+}
+
 func TestValidateBuilderInputs_AllowsNonASCIISubjectFields(t *testing.T) {
+	t.Parallel()
+
 	// Non-ASCII is legitimate in a DN; only the email attribute is IA5-limited.
 	err := validateBuilderInputs(t.Context(), &SubjectInfo{OrganizationName: "Müller GmbH"}, testARN)
 	if err != nil {
@@ -186,12 +269,16 @@ func TestValidateBuilderInputs_AllowsNonASCIISubjectFields(t *testing.T) {
 }
 
 func TestSubjectName_NilSubject(t *testing.T) {
-	if _, err := subjectName(nil); err == nil {
-		t.Fatal("expected nil subject error")
+	t.Parallel()
+
+	if _, err := subjectName(nil); err == nil || err.Error() != "subject cannot be nil" {
+		t.Fatalf("expected nil subject error, got: %v", err)
 	}
 }
 
 func TestLoadPublicKey_GetPublicKeyError(t *testing.T) {
+	t.Parallel()
+
 	sentinel := errors.New("kms unavailable")
 	_, err := newKMSCSRBuilderWithMock(
 		&SubjectInfo{CommonName: "test.example.com"},
@@ -204,6 +291,8 @@ func TestLoadPublicKey_GetPublicKeyError(t *testing.T) {
 }
 
 func TestLoadPublicKey_RejectsNonSigningKey(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -225,6 +314,8 @@ func TestLoadPublicKey_RejectsNonSigningKey(t *testing.T) {
 }
 
 func TestLoadPublicKey_RejectsUnparsablePublicKey(t *testing.T) {
+	t.Parallel()
+
 	_, err := newKMSCSRBuilderWithMock(
 		&SubjectInfo{CommonName: "test.example.com"},
 		testARN,
@@ -241,6 +332,8 @@ func TestLoadPublicKey_RejectsUnparsablePublicKey(t *testing.T) {
 }
 
 func TestLoadPublicKey_RejectsUnsupportedKeyType(t *testing.T) {
+	t.Parallel()
+
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate ed25519 key: %v", err)
@@ -265,6 +358,8 @@ func TestLoadPublicKey_RejectsUnsupportedKeyType(t *testing.T) {
 }
 
 func TestLoadPublicKey_RejectsUnadvertisedAlgorithms(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, _, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -287,25 +382,34 @@ func TestLoadPublicKey_RejectsUnadvertisedAlgorithms(t *testing.T) {
 }
 
 func TestBuildWithKMS_ECDSACurves(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		curve    elliptic.Curve
 		keySpec  types.KeySpec
 		signAlgo types.SigningAlgorithmSpec
+		hash     crypto.Hash
 		expected x509.SignatureAlgorithm
 	}{
 		{
+			"P-256", elliptic.P256(), types.KeySpecEccNistP256,
+			types.SigningAlgorithmSpecEcdsaSha256, crypto.SHA256, x509.ECDSAWithSHA256,
+		},
+		{
 			"P-384", elliptic.P384(), types.KeySpecEccNistP384,
-			types.SigningAlgorithmSpecEcdsaSha384, x509.ECDSAWithSHA384,
+			types.SigningAlgorithmSpecEcdsaSha384, crypto.SHA384, x509.ECDSAWithSHA384,
 		},
 		{
 			"P-521", elliptic.P521(), types.KeySpecEccNistP521,
-			types.SigningAlgorithmSpecEcdsaSha512, x509.ECDSAWithSHA512,
+			types.SigningAlgorithmSpecEcdsaSha512, crypto.SHA512, x509.ECDSAWithSHA512,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			publicKeyDER, privateKey := generateMockECDSAPublicKeyOnCurve(t, tt.curve)
 			builder := newSigningBuilder(
 				t,
@@ -323,6 +427,7 @@ func TestBuildWithKMS_ECDSACurves(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to build CSR: %v", err)
 			}
+			assertSignInput(t, recordedSignInput(t, builder), tt.signAlgo, tt.hash)
 			csr, err := x509.ParseCertificateRequest(csrDER)
 			if err != nil {
 				t.Fatalf("failed to parse CSR: %v", err)
@@ -333,11 +438,16 @@ func TestBuildWithKMS_ECDSACurves(t *testing.T) {
 			if csr.SignatureAlgorithm != tt.expected {
 				t.Fatalf("expected %v, got: %v", tt.expected, csr.SignatureAlgorithm)
 			}
+			if !privateKey.PublicKey.Equal(csr.PublicKey) {
+				t.Fatal("public key in CSR does not match the KMS key")
+			}
 		})
 	}
 }
 
 func TestBuildWithKMS_NilContext(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 
 	//nolint:staticcheck // explicitly verifies rejection of a nil context
@@ -347,6 +457,8 @@ func TestBuildWithKMS_NilContext(t *testing.T) {
 }
 
 func TestBuildWithKMS_NilSubject(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 	builder.Subject = nil
 
@@ -356,6 +468,8 @@ func TestBuildWithKMS_NilSubject(t *testing.T) {
 }
 
 func TestBuildWithKMS_RejectsMalformedSANs(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		domains []string
@@ -366,6 +480,25 @@ func TestBuildWithKMS_RejectsMalformedSANs(t *testing.T) {
 		{"whitespace domain", []string{"   "}, nil, "cannot be empty"},
 		{"padded domain", []string{" example.com"}, nil, "whitespace"},
 		{"trailing space domain", []string{"example.com "}, nil, "whitespace"},
+		// A verifier that stops at the NUL would match www.bank.com, a name
+		// the issuing CA never saw (the null-prefix attack).
+		{
+			"NUL in domain", []string{"www.bank.com\x00.evil.com"}, nil,
+			`subject alternative DNS name "www.bank.com\x00.evil.com" must not contain control characters`,
+		},
+		{
+			"line feed in domain", []string{"a.com\nb.com"}, nil,
+			`subject alternative DNS name "a.com\nb.com" must not contain control characters`,
+		},
+		{
+			"DEL in domain", []string{"exa\x7fmple.com"}, nil,
+			`subject alternative DNS name "exa\x7fmple.com" must not contain control characters`,
+		},
+		{
+			"control character in a later domain", []string{"www.example.com", "api\t.example.com"}, nil,
+			`subject alternative DNS name "api\t.example.com" must not contain control characters`,
+		},
+		{"non-ASCII domain", []string{"exämple.com"}, nil, "must contain only ASCII characters"},
 		{"nil ip", nil, []net.IP{nil}, "invalid subject alternative IP"},
 		{"short ip", nil, []net.IP{{1, 2, 3}}, "invalid subject alternative IP"},
 		{"odd length ip", nil, []net.IP{{1, 2, 3, 4, 5}}, "invalid subject alternative IP"},
@@ -373,19 +506,139 @@ func TestBuildWithKMS_RejectsMalformedSANs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
+			t.Parallel()
+
+			builder := newECDSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 			builder.SubjectAltDomains = tt.domains
 			builder.SubjectAltIPs = tt.ips
 
-			_, err := builder.BuildWithKMS(t.Context())
+			csrDER, err := builder.BuildWithKMS(t.Context())
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected %q, got: %v", tt.wantErr, err)
+			}
+			if csrDER != nil {
+				t.Errorf("expected no CSR alongside the error, got %d bytes", len(csrDER))
+			}
+			assertSignNotCalled(t, builder)
+		})
+	}
+}
+
+// rawEmailAttribute builds an emailAddress attribute the way subjectName does,
+// as a raw IA5String, but without the constructor's validation of the value.
+func rawEmailAttribute(value []byte) pkix.AttributeTypeAndValue {
+	return pkix.AttributeTypeAndValue{
+		Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1},
+		Value: asn1.RawValue{Tag: asn1.TagIA5String, Bytes: value},
+	}
+}
+
+// TestBuildWithKMS_RevalidatesMutatedSubject covers Subject being exported: a
+// caller can change it after the constructor validated the SubjectInfo, so
+// BuildWithKMS has to apply the control character rule again before signing.
+func TestBuildWithKMS_RevalidatesMutatedSubject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(name *pkix.Name)
+		wantErr string // empty when the request must still build
+	}{
+		{
+			name:    "common name with NUL",
+			mutate:  func(name *pkix.Name) { name.CommonName = "www.bank.com\x00.evil.com" },
+			wantErr: "subject attribute 2.5.4.3 must not contain control characters",
+		},
+		{
+			name:    "common name with DEL",
+			mutate:  func(name *pkix.Name) { name.CommonName = "example\x7f.com" },
+			wantErr: "subject attribute 2.5.4.3 must not contain control characters",
+		},
+		{
+			name:    "second organization value with line feed",
+			mutate:  func(name *pkix.Name) { name.Organization = append(name.Organization, "Evil\nCorp") },
+			wantErr: "subject attribute 2.5.4.10 must not contain control characters",
+		},
+		{
+			name: "extra name string with carriage return",
+			mutate: func(name *pkix.Name) {
+				name.ExtraNames = append(name.ExtraNames, pkix.AttributeTypeAndValue{
+					Type:  asn1.ObjectIdentifier{2, 5, 4, 5},
+					Value: "SN\r123",
+				})
+			},
+			wantErr: "subject attribute 2.5.4.5 must not contain control characters",
+		},
+		{
+			name: "raw email value with NUL",
+			mutate: func(name *pkix.Name) {
+				name.ExtraNames = append(name.ExtraNames, rawEmailAttribute([]byte("root@example.com\x00")))
+			},
+			wantErr: "subject attribute 1.2.840.113549.1.9.1 must not contain control characters",
+		},
+		{
+			// The string cannot be encoded at all.
+			name:    "invalid UTF-8 common name",
+			mutate:  func(name *pkix.Name) { name.CommonName = "bad\xffname" },
+			wantErr: "invalid subject: ",
+		},
+		{
+			// Encodes as given, but an IA5String cannot hold the byte, so it
+			// does not decode.
+			name: "raw email value that is not IA5",
+			mutate: func(name *pkix.Name) {
+				name.ExtraNames = append(name.ExtraNames, rawEmailAttribute([]byte("root@exämple.com")))
+			},
+			wantErr: "invalid subject: ",
+		},
+		{
+			name:   "unchanged subject including the constructor's raw email value",
+			mutate: func(*pkix.Name) {},
+		},
+		{
+			name:   "replacement common name without control characters",
+			mutate: func(name *pkix.Name) { name.CommonName = "Müller GmbH" },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			builder := newECDSASigningBuilder(t, &SubjectInfo{
+				CommonName:       "www.example.com",
+				OrganizationName: "Example Corp",
+				EmailAddress:     "admin@example.com",
+			})
+			tt.mutate(builder.Subject)
+
+			csrDER, err := builder.BuildWithKMS(t.Context())
+			if tt.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+					t.Fatalf("expected %q, got: %v", tt.wantErr, err)
+				}
+				assertSignNotCalled(t, builder)
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("failed to build CSR: %v", err)
+			}
+			csr, err := x509.ParseCertificateRequest(csrDER)
+			if err != nil {
+				t.Fatalf("failed to parse CSR: %v", err)
+			}
+			if csr.Subject.CommonName != builder.Subject.CommonName {
+				t.Errorf("expected CN %q, got: %q", builder.Subject.CommonName, csr.Subject.CommonName)
 			}
 		})
 	}
 }
 
 func TestBuildWithKMS_AcceptsValidSANs(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 	builder.SubjectAltDomains = []string{"www.example.com"}
 	builder.SubjectAltIPs = []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::1")}
@@ -411,6 +664,8 @@ func TestBuildWithKMS_AcceptsValidSANs(t *testing.T) {
 }
 
 func TestBuildWithKMS_CAExtensionEncoding(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "ca.example.com"})
 	builder.SetCA(true)
 
@@ -451,6 +706,8 @@ func TestBuildWithKMS_CAExtensionEncoding(t *testing.T) {
 }
 
 func TestBuildWithKMS_DefaultExtKeyUsage(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "leaf.example.com"})
 
 	csrDER, err := builder.BuildWithKMS(t.Context())
@@ -469,6 +726,8 @@ func TestBuildWithKMS_DefaultExtKeyUsage(t *testing.T) {
 }
 
 func TestBuildWithKMS_PropagatesKMSSignError(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -493,7 +752,73 @@ func TestBuildWithKMS_PropagatesKMSSignError(t *testing.T) {
 	}
 }
 
+// TestBuildWithKMS_RejectsSignatureFromAnotherKey covers KMS returning a
+// signature that does not verify under the public key it reported, for example
+// a key ARN or alias that resolved differently between the two calls. The CSR
+// must not be returned, since a CA would reject it, or worse, bind it to the
+// wrong key.
+func TestBuildWithKMS_RejectsSignatureFromAnotherKey(t *testing.T) {
+	t.Parallel()
+
+	publicKeyDER, _ := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
+	_, otherKey := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
+	builder := newSigningBuilder(
+		t,
+		&SubjectInfo{CommonName: "test.example.com"},
+		publicKeyDER,
+		types.KeySpecEccNistP256,
+		types.SigningAlgorithmSpecEcdsaSha256,
+		otherKey,
+	)
+
+	csrDER, err := builder.BuildWithKMS(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("expected signature verification error, got: %v", err)
+	}
+	if csrDER != nil {
+		t.Fatalf("expected no CSR, got %d bytes", len(csrDER))
+	}
+}
+
+// TestBuildWithKMS_ZeroValueBuilder covers a Builder assembled from its
+// exported fields instead of a constructor. It has no KMS client, so it must
+// fail with an error before reaching one rather than panic.
+func TestBuildWithKMS_ZeroValueBuilder(t *testing.T) {
+	t.Parallel()
+
+	subject, err := subjectName(&SubjectInfo{CommonName: "example.com"})
+	if err != nil {
+		t.Fatalf("failed to build subject: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		builder Builder
+		wantErr string
+	}{
+		{"zero value", Builder{}, "subject cannot be nil"},
+		{"subject only", Builder{Subject: subject}, "signing algorithm cannot be empty"},
+		{
+			"algorithm without KMS key metadata",
+			Builder{Subject: subject, HashAlgo: types.SigningAlgorithmSpecEcdsaSha256},
+			"KMS key does not support signing algorithm ECDSA_SHA_256",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, buildErr := tt.builder.BuildWithKMS(t.Context()); buildErr == nil || buildErr.Error() != tt.wantErr {
+				t.Fatalf("expected %q, got: %v", tt.wantErr, buildErr)
+			}
+		})
+	}
+}
+
 func TestKMSSigner_RejectsMismatchedOptions(t *testing.T) {
+	t.Parallel()
+
 	signer := &kmsSigner{signAlgo: types.SigningAlgorithmSpecRsassaPkcs1V15Sha256}
 	digest := make([]byte, crypto.SHA256.Size())
 
@@ -508,6 +833,8 @@ func TestKMSSigner_RejectsMismatchedOptions(t *testing.T) {
 }
 
 func TestKMSSigner_RejectsWrongDigestLength(t *testing.T) {
+	t.Parallel()
+
 	signer := &kmsSigner{signAlgo: types.SigningAlgorithmSpecEcdsaSha256}
 
 	_, err := signer.Sign(rand.Reader, []byte("short"), crypto.SHA256)
@@ -517,6 +844,8 @@ func TestKMSSigner_RejectsWrongDigestLength(t *testing.T) {
 }
 
 func TestKMSSigner_RejectsUnsupportedAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	signer := &kmsSigner{signAlgo: types.SigningAlgorithmSpec("UNSUPPORTED")}
 
 	if _, err := signer.Sign(rand.Reader, nil, crypto.SHA256); err == nil ||
@@ -526,6 +855,8 @@ func TestKMSSigner_RejectsUnsupportedAlgorithm(t *testing.T) {
 }
 
 func TestKMSSigner_Public(t *testing.T) {
+	t.Parallel()
+
 	_, privateKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -538,6 +869,8 @@ func TestKMSSigner_Public(t *testing.T) {
 }
 
 func TestKMSSigner_RejectsEmptySignOutput(t *testing.T) {
+	t.Parallel()
+
 	signer := &kmsSigner{
 		ctx:       context.Background(),
 		kmsClient: &nilOutputKMSClient{},
@@ -551,12 +884,16 @@ func TestKMSSigner_RejectsEmptySignOutput(t *testing.T) {
 }
 
 func TestKeyUsageExtension_RejectsZero(t *testing.T) {
+	t.Parallel()
+
 	if _, err := keyUsageExtension(0); err == nil || !strings.Contains(err.Error(), "at least one bit") {
 		t.Fatalf("expected zero key usage error, got: %v", err)
 	}
 }
 
 func TestKeyUsageExtension_CombinedBits(t *testing.T) {
+	t.Parallel()
+
 	usage := x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageDecipherOnly
 	extension, err := keyUsageExtension(usage)
 	if err != nil {
@@ -571,12 +908,16 @@ func TestKeyUsageExtension_CombinedBits(t *testing.T) {
 }
 
 func TestExtKeyUsageExtension_RejectsEmpty(t *testing.T) {
+	t.Parallel()
+
 	if _, err := extKeyUsageExtension(nil); err == nil || !strings.Contains(err.Error(), "cannot be empty") {
 		t.Fatalf("expected empty extended key usage error, got: %v", err)
 	}
 }
 
 func TestExtKeyUsageOID_AllSupportedUsages(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		usage x509.ExtKeyUsage
 		oid   asn1.ObjectIdentifier
@@ -603,6 +944,8 @@ func TestExtKeyUsageOID_AllSupportedUsages(t *testing.T) {
 }
 
 func TestGetSignatureAlgorithm_Unsupported(t *testing.T) {
+	t.Parallel()
+
 	_, err := getSignatureAlgorithm(types.SigningAlgorithmSpecRsassaPssSha256)
 	if err == nil || !strings.Contains(err.Error(), "unsupported signing algorithm") {
 		t.Fatalf("expected unsupported signing algorithm error, got: %v", err)
@@ -610,6 +953,8 @@ func TestGetSignatureAlgorithm_Unsupported(t *testing.T) {
 }
 
 func TestHashForSigningAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		algo     types.SigningAlgorithmSpec
 		expected crypto.Hash
@@ -629,12 +974,15 @@ func TestHashForSigningAlgorithm(t *testing.T) {
 		}
 	}
 
-	if _, err := hashForSigningAlgorithm(types.SigningAlgorithmSpecRsassaPssSha512); err == nil {
-		t.Error("expected unsupported signing algorithm error")
+	if _, err := hashForSigningAlgorithm(types.SigningAlgorithmSpecRsassaPssSha512); err == nil ||
+		err.Error() != "unsupported signing algorithm: RSASSA_PSS_SHA_512" {
+		t.Errorf("expected unsupported signing algorithm error, got: %v", err)
 	}
 }
 
 func TestDefaultSigningAlgorithm(t *testing.T) {
+	t.Parallel()
+
 	_, rsaKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -673,6 +1021,8 @@ func TestDefaultSigningAlgorithm(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			algo, algoErr := defaultSigningAlgorithm(tt.publicKey, tt.supported)
 			if algoErr != nil {
 				t.Fatalf("unexpected error: %v", algoErr)
@@ -685,24 +1035,46 @@ func TestDefaultSigningAlgorithm(t *testing.T) {
 }
 
 func TestDefaultSigningAlgorithm_ECDSACurves(t *testing.T) {
+	t.Parallel()
+
+	sha256 := types.SigningAlgorithmSpecEcdsaSha256
+	sha384 := types.SigningAlgorithmSpecEcdsaSha384
+	sha512 := types.SigningAlgorithmSpecEcdsaSha512
+	all := []types.SigningAlgorithmSpec{sha256, sha384, sha512}
+
 	tests := []struct {
-		curve    elliptic.Curve
-		expected types.SigningAlgorithmSpec
+		name      string
+		curve     elliptic.Curve
+		supported []types.SigningAlgorithmSpec
+		expected  types.SigningAlgorithmSpec // empty when no candidate is advertised
 	}{
-		{elliptic.P256(), types.SigningAlgorithmSpecEcdsaSha256},
-		{elliptic.P384(), types.SigningAlgorithmSpecEcdsaSha384},
-		{elliptic.P521(), types.SigningAlgorithmSpecEcdsaSha512},
-	}
-	all := []types.SigningAlgorithmSpec{
-		types.SigningAlgorithmSpecEcdsaSha256,
-		types.SigningAlgorithmSpecEcdsaSha384,
-		types.SigningAlgorithmSpecEcdsaSha512,
+		{"P-256", elliptic.P256(), all, sha256},
+		{"P-384", elliptic.P384(), all, sha384},
+		{"P-521", elliptic.P521(), all, sha512},
+		{"P-384 falls back to SHA-256", elliptic.P384(), []types.SigningAlgorithmSpec{sha512, sha256}, sha256},
+		{"P-384 falls back to SHA-512", elliptic.P384(), []types.SigningAlgorithmSpec{sha512}, sha512},
+		{"P-521 falls back to SHA-384", elliptic.P521(), []types.SigningAlgorithmSpec{sha256, sha384}, sha384},
+		{"P-521 falls back to SHA-256", elliptic.P521(), []types.SigningAlgorithmSpec{sha256}, sha256},
+		{"P-256 has no fallback", elliptic.P256(), []types.SigningAlgorithmSpec{sha384, sha512}, ""},
+		{
+			"RSA algorithms do not apply to an ECDSA key", elliptic.P256(),
+			[]types.SigningAlgorithmSpec{types.SigningAlgorithmSpecRsassaPkcs1V15Sha256}, "",
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.curve.Params().Name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			_, privateKey := generateMockECDSAPublicKeyOnCurve(t, tt.curve)
-			algo, err := defaultSigningAlgorithm(&privateKey.PublicKey, all)
+			algo, err := defaultSigningAlgorithm(&privateKey.PublicKey, tt.supported)
+			if tt.expected == "" {
+				if err == nil || !strings.Contains(err.Error(), "does not advertise") {
+					t.Fatalf("expected unadvertised algorithm error, got %q, %v", algo, err)
+				}
+
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -714,6 +1086,8 @@ func TestDefaultSigningAlgorithm_ECDSACurves(t *testing.T) {
 }
 
 func TestDefaultSigningAlgorithm_UnsupportedCurve(t *testing.T) {
+	t.Parallel()
+
 	privateKey, err := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate P-224 key: %v", err)
@@ -728,6 +1102,8 @@ func TestDefaultSigningAlgorithm_UnsupportedCurve(t *testing.T) {
 }
 
 func TestDefaultSigningAlgorithm_NoAdvertisedAlgorithms(t *testing.T) {
+	t.Parallel()
+
 	_, rsaKey, err := generateMockRSAPublicKey()
 	if err != nil {
 		t.Fatalf("failed to generate mock public key: %v", err)
@@ -737,12 +1113,26 @@ func TestDefaultSigningAlgorithm_NoAdvertisedAlgorithms(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not advertise") {
 		t.Fatalf("expected unadvertised algorithm error, got: %v", err)
 	}
+
+	// Algorithms for other key types, or RSA schemes this library does not
+	// implement, are not candidates for an RSA key.
+	_, err = defaultSigningAlgorithm(&rsaKey.PublicKey, []types.SigningAlgorithmSpec{
+		types.SigningAlgorithmSpecEcdsaSha256,
+		types.SigningAlgorithmSpecRsassaPssSha256,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not advertise") {
+		t.Fatalf("expected unadvertised algorithm error, got: %v", err)
+	}
 }
 
 func TestResolveSigningAlgorithm_Errors(t *testing.T) {
+	t.Parallel()
+
 	rsaBuilder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "test.example.com"})
 
 	t.Run("empty algorithm", func(t *testing.T) {
+		t.Parallel()
+
 		builder := *rsaBuilder
 		builder.HashAlgo = ""
 		if _, _, err := builder.resolveSigningAlgorithm(); err == nil ||
@@ -752,6 +1142,8 @@ func TestResolveSigningAlgorithm_Errors(t *testing.T) {
 	})
 
 	t.Run("algorithm not advertised by KMS", func(t *testing.T) {
+		t.Parallel()
+
 		builder := *rsaBuilder
 		builder.HashAlgo = types.SigningAlgorithmSpecRsassaPkcs1V15Sha512
 		if _, _, err := builder.resolveSigningAlgorithm(); err == nil ||
@@ -761,6 +1153,8 @@ func TestResolveSigningAlgorithm_Errors(t *testing.T) {
 	})
 
 	t.Run("ECDSA algorithm on RSA key", func(t *testing.T) {
+		t.Parallel()
+
 		builder := *rsaBuilder
 		builder.HashAlgo = types.SigningAlgorithmSpecEcdsaSha256
 		builder.supportedSigningAlgorithms = []types.SigningAlgorithmSpec{types.SigningAlgorithmSpecEcdsaSha256}
@@ -771,6 +1165,8 @@ func TestResolveSigningAlgorithm_Errors(t *testing.T) {
 	})
 
 	t.Run("RSA algorithm on ECDSA key", func(t *testing.T) {
+		t.Parallel()
+
 		publicKeyDER, privateKey := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
 		builder := newSigningBuilder(
 			t,
@@ -791,6 +1187,8 @@ func TestResolveSigningAlgorithm_Errors(t *testing.T) {
 	})
 
 	t.Run("unsupported public key type", func(t *testing.T) {
+		t.Parallel()
+
 		builder := *rsaBuilder
 		builder.publicKey = "not-a-key"
 		if _, _, err := builder.resolveSigningAlgorithm(); err == nil ||

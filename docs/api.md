@@ -160,6 +160,10 @@ func (b *Builder) SetCA(isCA bool)
 - When `true`: Sets KeyUsage to `CertSign | CRLSign` and ExtKeyUsage to `OCSPSigning`
 - When `false`: Sets KeyUsage to `DigitalSignature | KeyEncipherment` and ExtKeyUsage to `ServerAuth | ClientAuth`
 
+`SetCA` overwrites any earlier changes to `KeyUsage` and `ExtKeyUsage`, so
+customize them after calling it. Setting the `CA` field directly does not apply
+these defaults.
+
 **Example:**
 ```go
 builder.SetCA(true)  // Configure as CA certificate
@@ -294,14 +298,16 @@ library was rewritten from.
 ## Input Validation
 
 The library rejects inputs that would encode into a malformed CSR. Subject
-validation happens at construction; subject alternative name validation happens
-at the start of `BuildWithKMS`, before any signing call is made.
+validation happens at construction, and again at the start of `BuildWithKMS`
+because `Builder.Subject` may be changed after construction. Subject
+alternative name validation happens at the start of `BuildWithKMS`. Both run
+before any signing call is made.
 
 | Input | Rule |
 | --- | --- |
 | Any subject field | Must not contain control characters (NUL, line breaks, and similar), which downstream certificate tooling may truncate or misparse |
 | `EmailAddress` | Must contain only ASCII characters, as it is encoded as an `IA5String` |
-| `SubjectAltDomains` entries | Must be non-empty, ASCII-only, and free of leading or trailing whitespace |
+| `SubjectAltDomains` entries | Must be non-empty, ASCII-only, free of leading or trailing whitespace, and free of control characters |
 | `SubjectAltIPs` entries | Must be 4-byte or 16-byte addresses |
 | `KeyUsage` | Must set at least one of the nine supported bits and no others |
 | `ExtKeyUsage` | Must contain only the supported usages listed above |

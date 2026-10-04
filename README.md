@@ -9,7 +9,7 @@ A Go library and CLI tool for creating and signing X.509 certificate signing req
 - Subject Alternative Names (DNS and IP addresses)
 - Configurable key usage and extended key usage extensions
 - Full support for CA and non-CA certificate requests
-- Pure Go implementation using Go 1.26
+- Pure Go implementation using Go 1.27
 - Command-line interface for easy CSR generation
 
 ## Installation
@@ -38,7 +38,7 @@ go build ./cmd/kmscsr
 
 - AWS SDK for Go v2 (`github.com/aws/aws-sdk-go-v2`)
 - Cobra CLI framework (`github.com/spf13/cobra`)
-- Go 1.26.5 or later
+- Go 1.27.1 or later
 
 ## Usage
 
@@ -122,8 +122,8 @@ call is made:
   break), which downstream certificate tooling may truncate or misparse.
 - The email address must contain only ASCII characters.
 - Subject alternative DNS names must be non-empty, ASCII-only, and free of
-  leading or trailing whitespace. Supply internationalized names in A-label
-  form.
+  leading or trailing whitespace and control characters. Supply
+  internationalized names in A-label form.
 - Subject alternative IP addresses must be 4-byte or 16-byte addresses.
 
 ## AWS Configuration
@@ -155,6 +155,8 @@ MIT License - see the [LICENSE](LICENSE) file for details.
 - [End-to-End Testing](docs/e2e-testing.md) — results of the last run against
   real AWS KMS, and how to repeat it
 
-## Version
+## Releases
 
-Current version: 1.0.0
+See [GitHub Releases](https://github.com/cavenine/kmscsr/releases) and the
+[changelog](CHANGELOG.md). `kmscsr --version` reports the version of an
+installed binary.
