@@ -5,33 +5,79 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    # Weekly, so newly published vulnerabilities surface without a code change.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
           cache: true
           cache-dependency-path: "go.sum"
 
-      - name: Vet
-        run: go vet ./...
+      - name: Test with race detector and coverage
+        if: runner.os == 'Linux'
+        run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
 
       - name: Test
-        run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+        if: runner.os != 'Linux'
+        run: go test ./...
 
       - name: Build
         run: go build ./...
 
+  lint:
+    name: Lint and vulnerability scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check line endings
+        # .gitattributes normalizes text files to LF on commit. This catches a
+        # CRLF file that gets in anyway, e.g. if that file is edited or removed.
+        run: |
+          if git ls-files --eol | grep -E 'i/(crlf|mixed)'; then
+            echo "::error::The files above are committed with CRLF line endings. Run: git add --renormalize ."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+          cache-dependency-path: "go.sum"
+
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        run: go tool golangci-lint run ./...
+
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: go tool govulncheck ./...
