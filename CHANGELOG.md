@@ -4,7 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- Subject alternative DNS names containing control characters were signed.
+  ASCII-only validation let through a name such as `www.example.com\x00.evil.com`,
+  which verifiers that stop at the NUL can match against a name the CA never
+  vetted. Such names are now rejected before signing
+- Changes made to `Builder.Subject` after construction bypassed the
+  control-character validation applied to `SubjectInfo`. `BuildWithKMS` now
+  validates the subject it is about to encode
+
+### Changed
+- Raised the minimum Go version to 1.27.1
+- Upgraded AWS SDK for Go v2 (`config` v1.32.35 → v1.33.6, `service/kms`
+  v1.55.4 → v1.61.1)
+- govulncheck is now pinned by a `tool` directive in `go.mod` (v1.8.0),
+  replacing the `go run ...@v1.6.0` invocations in CI and the release hooks
+- Upgraded golangci-lint to v2.14.0 with the matching upstream golden config,
+  which now also enforces the stdlib/third-party/local import grouping and
+  `t.Parallel()` in tests
+- CI now runs golangci-lint and checks `go mod tidy`, runs tests on Linux, macOS,
+  and Windows, and runs weekly to catch newly published vulnerabilities.
+  Dependabot keeps Go modules and GitHub Actions current
+
 ### Fixed
+- The CLI silently ignored stray positional arguments, so
+  `--san-dns a.example.com b.example.com` produced a request without
+  `b.example.com`. Positional arguments are now an error
+- A negative `--timeout` silently disabled the timeout instead of being rejected
+- The unsupported key usage error printed a hex encoding of the text
+  `KeyUsage(512)` instead of the offending bits, because `x509.KeyUsage`
+  implements `fmt.Stringer` as of Go 1.27
+- Subject fields containing invalid UTF-8 passed the constructor and only failed
+  in `BuildWithKMS`, after a KMS `GetPublicKey` call. They are now rejected
+  up front
+- `TestGenerateCSR_WritesOutputFileWithRestrictivePermissions` failed on Windows,
+  which has no Unix permission bits
+- A `.gitattributes` now forces LF line endings. Checkouts with
+  `core.autocrlf=true` (the Git for Windows default) otherwise failed every
+  gofmt/goimports check. An `.editorconfig` defaults editors to LF, and CI
+  rejects any file committed with CRLF
 - Binaries built with `go install` or `go build` reported `dev`/`none`/`unknown`,
   because only GoReleaser passes the `-X` ldflags. Build metadata now falls back
   to `runtime/debug.ReadBuildInfo`, so `go install pkg@version` reports the
