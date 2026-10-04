@@ -157,8 +157,22 @@ func (b *Builder) SetCA(isCA bool)
 - `isCA`: `true` for CA certificate requests, `false` for end-entity certificates
 
 **Effects:**
-- When `true`: Sets KeyUsage to `CertSign | CRLSign` and ExtKeyUsage to `OCSPSigning`
-- When `false`: Sets KeyUsage to `DigitalSignature | KeyEncipherment` and ExtKeyUsage to `ServerAuth | ClientAuth`
+- When `true`: Sets KeyUsage to `CertSign | CRLSign` and clears ExtKeyUsage, so
+  no extended key usage is requested
+- When `false`: Sets KeyUsage to `DigitalSignature`, plus `KeyEncipherment` for
+  an RSA key, and ExtKeyUsage to `ServerAuth | ClientAuth`
+
+A CA request carries no extended key usage because many verifiers, including
+Go's `crypto/x509` and Windows, treat an extended key usage on a CA certificate
+as a limit on every certificate issued beneath it. `OCSPSigning` in particular
+would make the CA a delegated OCSP responder for its own issuer (RFC 6960
+§4.2.2.2), able to vouch for the revocation status of anything that issuer
+signed, including itself. To constrain a CA anyway, set `ExtKeyUsage` after
+calling `SetCA(true)`.
+
+`KeyEncipherment` is requested only for RSA keys. It describes encrypting a key
+to the certificate's public key, which is RSA key transport; an ECDSA key can
+only sign, and RFC 5480 §3 does not permit the bit for EC keys.
 
 `SetCA` overwrites any earlier changes to `KeyUsage` and `ExtKeyUsage`, so
 customize them after calling it. Setting the `CA` field directly does not apply
@@ -290,10 +304,14 @@ follows RFC 5280.
 | Subject Alternative Name | 2.5.29.17 | Any `SubjectAltDomains` or `SubjectAltIPs` | Only when the subject is empty (RFC 5280 §4.2.1.6) |
 
 A default non-CA request therefore contains basic constraints (`cA=FALSE`), key
-usage (`digitalSignature`, `keyEncipherment`), and extended key usage
-(`serverAuth`, `clientAuth`) — matching the
-[csrbuilder](https://github.com/wbond/csrbuilder) reference implementation this
-library was rewritten from.
+usage (`digitalSignature`, plus `keyEncipherment` for an RSA key), and extended
+key usage (`serverAuth`, `clientAuth`). A default CA request contains basic
+constraints (`cA=TRUE`) and key usage (`keyCertSign`, `cRLSign`).
+
+These follow the [csrbuilder](https://github.com/wbond/csrbuilder) reference
+implementation this library was rewritten from, with two deliberate
+differences: csrbuilder requests `keyEncipherment` for every key type, and
+`OCSPSigning` for CA requests. See `SetCA` for why.
 
 ## Input Validation
 

@@ -304,13 +304,27 @@ func (b *Builder) loadPublicKey(ctx context.Context) error {
 // SetCA sets whether this is a CA certificate request, and resets KeyUsage and
 // ExtKeyUsage to the defaults for that kind of request. Customize either one
 // after calling SetCA, not before.
+//
+// A CA request asks for keyCertSign and cRLSign, and no extended key usage.
+// Many verifiers treat extended key usages on a CA certificate as a limit on
+// every certificate beneath it, and id-kp-OCSPSigning in particular would make
+// the CA a delegated OCSP responder for its own issuer (RFC 6960 section
+// 4.2.2.2).
+//
+// An end-entity request asks for serverAuth and clientAuth, and for
+// digitalSignature, plus keyEncipherment when the key is RSA. An ECDSA key
+// cannot encrypt, and RFC 5480 section 3 does not permit keyEncipherment for
+// one.
 func (b *Builder) SetCA(isCA bool) {
 	b.CA = isCA
 	if isCA {
 		b.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
-		b.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}
+		b.ExtKeyUsage = nil
 	} else {
-		b.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+		b.KeyUsage = x509.KeyUsageDigitalSignature
+		if _, isRSA := b.publicKey.(*rsa.PublicKey); isRSA {
+			b.KeyUsage |= x509.KeyUsageKeyEncipherment
+		}
 		b.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 	}
 }

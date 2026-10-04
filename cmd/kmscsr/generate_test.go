@@ -295,11 +295,6 @@ func TestGenerateCSR_CAFlagSetsCAKeyUsage(t *testing.T) {
 		{"basic constraints", "2.5.29.19", true, []byte{0x30, 0x03, 0x01, 0x01, 0xff}},
 		// keyCertSign and cRLSign only, not the leaf digitalSignature default.
 		{"key usage", "2.5.29.15", true, []byte{0x03, 0x02, 0x01, 0x06}},
-		// id-kp-OCSPSigning only, not the leaf serverAuth and clientAuth.
-		{
-			"extended key usage", "2.5.29.37", false,
-			[]byte{0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x09},
-		},
 	}
 	for _, tt := range tests {
 		extension := csrExtension(t, csr, tt.oid)
@@ -307,6 +302,12 @@ func TestGenerateCSR_CAFlagSetsCAKeyUsage(t *testing.T) {
 			t.Errorf("%s: expected %x (critical=%v), got %x (critical=%v)",
 				tt.name, tt.der, tt.critical, extension.Value, extension.Critical)
 		}
+	}
+
+	// No extended key usage: neither the leaf serverAuth and clientAuth, nor
+	// id-kp-OCSPSigning, which would make the CA an OCSP responder for its issuer.
+	if len(csr.Extensions) != len(tests) {
+		t.Errorf("expected only %d extensions, got: %#v", len(tests), csr.Extensions)
 	}
 }
 

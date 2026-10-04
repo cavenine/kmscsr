@@ -12,8 +12,18 @@ All notable changes to this project will be documented in this file.
 - Changes made to `Builder.Subject` after construction bypassed the
   control-character validation applied to `SubjectInfo`. `BuildWithKMS` now
   validates the subject it is about to encode
+- **Behavior change:** CA requests (`SetCA(true)`, `--ca`) no longer request
+  the `OCSPSigning` extended key usage, or any extended key usage. If the
+  issuing CA honored it, the new CA became a delegated OCSP responder for its
+  own issuer (RFC 6960 §4.2.2.2). Verifiers that treat a CA's extended key
+  usage as a limit on the chain, such as Go's `crypto/x509` and Windows, also
+  rejected the TLS certificates it issued. To constrain a CA anyway, set
+  `ExtKeyUsage` after `SetCA(true)`
 
 ### Changed
+- **Behavior change:** end-entity requests for ECDSA keys no longer request
+  `keyEncipherment`, which RFC 5480 §3 does not permit for EC keys. They request
+  `digitalSignature` only. RSA requests still request both
 - Raised the minimum Go version to 1.27.1
 - Upgraded AWS SDK for Go v2 (`config` v1.32.35 → v1.33.6, `service/kms`
   v1.55.4 → v1.61.1)

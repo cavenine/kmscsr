@@ -52,6 +52,9 @@ func decodeIsCA(t *testing.T, value []byte) bool {
 // implementation this library was rewritten from. It pins the shape of a
 // default non-CA request: four extensions, with the criticality RFC 5280
 // prescribes for each.
+//
+// It deliberately diverges in one place: the reference asserts keyEncipherment
+// for this ECDSA key, which RFC 5480 section 3 does not permit for EC keys.
 func TestParity_BuildBasic(t *testing.T) {
 	t.Parallel()
 
@@ -102,9 +105,8 @@ func TestParity_BuildBasic(t *testing.T) {
 
 	if keyUsage := findExtension(t, csr, oidKeyUsage()); !keyUsage.Critical {
 		t.Error("key usage must be critical")
-	} else if decoded := decodeKeyUsage(t, keyUsage.Value); decoded !=
-		x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment {
-		t.Errorf("expected digital_signature|key_encipherment, got: %v", decoded)
+	} else if decoded := decodeKeyUsage(t, keyUsage.Value); decoded != x509.KeyUsageDigitalSignature {
+		t.Errorf("expected digital_signature only for an ECDSA key, got: %v", decoded)
 	}
 
 	if extKeyUsage := findExtension(t, csr, oidExtKeyUsage()); extKeyUsage.Critical {
