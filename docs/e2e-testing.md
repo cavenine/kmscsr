@@ -66,6 +66,11 @@ than an IPv4-mapped IPv6 address, confirming the four-byte encoding.
 The `--ca` request produced `Basic Constraints: critical, CA:TRUE`, key usage
 `Certificate Sign, CRL Sign`, and extended key usage `OCSP Signing`.
 
+> **Defaults changed after this run.** CA requests no longer request any
+> extended key usage, and ECDSA end-entity requests request `Digital Signature`
+> only, without `Key Encipherment`. RSA end-entity requests are unchanged. A
+> repeat run would show the new defaults; see the changelog.
+
 ### Key provenance
 
 The public key was pulled straight from KMS and byte-compared against the key

@@ -12,6 +12,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -702,7 +703,81 @@ func TestBuildWithKMS_CAExtensionEncoding(t *testing.T) {
 		t.Fatal("basic constraints extension not found")
 	}
 
-	assertExtKeyUsage(t, csr, []asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 9}})
+	// A CA request carries no extended key usage: verifiers apply it as a
+	// limit on the whole chain, and id-kp-OCSPSigning would make the CA a
+	// delegated OCSP responder for its issuer.
+	for _, extension := range csr.Extensions {
+		if extension.Id.Equal(asn1.ObjectIdentifier{2, 5, 29, 37}) {
+			t.Errorf("expected no extended key usage in a CA request, got: %x", extension.Value)
+		}
+	}
+}
+
+// TestSetCA_DefaultsByKeyType pins the usage defaults for each kind of request.
+// keyEncipherment is requested only for RSA, since RFC 5480 does not permit it
+// for EC keys, and a CA requests no extended key usage at all.
+func TestSetCA_DefaultsByKeyType(t *testing.T) {
+	t.Parallel()
+
+	leafExtKeyUsage := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	tests := []struct {
+		name            string
+		newBuilder      func(t *testing.T) *Builder
+		isCA            bool
+		wantKeyUsage    x509.KeyUsage
+		wantExtKeyUsage []x509.ExtKeyUsage
+	}{
+		{
+			name:            "RSA leaf",
+			newBuilder:      func(t *testing.T) *Builder { return newRSASigningBuilder(t, &SubjectInfo{CommonName: "a"}) },
+			wantKeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+			wantExtKeyUsage: leafExtKeyUsage,
+		},
+		{
+			name:            "ECDSA leaf",
+			newBuilder:      func(t *testing.T) *Builder { return newECDSASigningBuilder(t, &SubjectInfo{CommonName: "a"}) },
+			wantKeyUsage:    x509.KeyUsageDigitalSignature,
+			wantExtKeyUsage: leafExtKeyUsage,
+		},
+		{
+			name:         "RSA CA",
+			newBuilder:   func(t *testing.T) *Builder { return newRSASigningBuilder(t, &SubjectInfo{CommonName: "a"}) },
+			isCA:         true,
+			wantKeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		},
+		{
+			name:         "ECDSA CA",
+			newBuilder:   func(t *testing.T) *Builder { return newECDSASigningBuilder(t, &SubjectInfo{CommonName: "a"}) },
+			isCA:         true,
+			wantKeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		},
+		{
+			// Without a known RSA key, keyEncipherment is never assumed.
+			name:            "zero-value builder leaf",
+			newBuilder:      func(*testing.T) *Builder { return &Builder{} },
+			wantKeyUsage:    x509.KeyUsageDigitalSignature,
+			wantExtKeyUsage: leafExtKeyUsage,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			builder := tt.newBuilder(t)
+			// Toggle through the other kind first, so the defaults are shown to
+			// be recomputed rather than left over from construction.
+			builder.SetCA(!tt.isCA)
+			builder.SetCA(tt.isCA)
+
+			if builder.KeyUsage != tt.wantKeyUsage {
+				t.Errorf("expected key usage %v, got: %v", tt.wantKeyUsage, builder.KeyUsage)
+			}
+			if !slices.Equal(builder.ExtKeyUsage, tt.wantExtKeyUsage) {
+				t.Errorf("expected extended key usage %v, got: %v", tt.wantExtKeyUsage, builder.ExtKeyUsage)
+			}
+		})
+	}
 }
 
 func TestBuildWithKMS_DefaultExtKeyUsage(t *testing.T) {

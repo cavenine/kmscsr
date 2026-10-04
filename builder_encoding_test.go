@@ -76,8 +76,14 @@ func TestKeyUsageExtension_GoldenDER(t *testing.T) {
 		usage x509.KeyUsage
 		der   []byte
 	}{
-		// The leaf default: bits 0 and 2, so five unused trailing bits.
-		{"leaf default", x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, []byte{0x03, 0x02, 0x05, 0xa0}},
+		// The RSA leaf default: bits 0 and 2, so five unused trailing bits.
+		{
+			"RSA leaf default",
+			x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+			[]byte{0x03, 0x02, 0x05, 0xa0},
+		},
+		// The ECDSA leaf default: bit 0 alone, so seven unused trailing bits.
+		{"ECDSA leaf default", x509.KeyUsageDigitalSignature, []byte{0x03, 0x02, 0x07, 0x80}},
 		// The CA default: bits 5 and 6, so one unused trailing bit.
 		{"CA default", x509.KeyUsageCertSign | x509.KeyUsageCRLSign, []byte{0x03, 0x02, 0x01, 0x06}},
 		// decipherOnly is bit 8, the only one that needs a second byte.
@@ -138,7 +144,7 @@ func TestExtKeyUsageExtension_MatchesCryptoX509(t *testing.T) {
 		usages []x509.ExtKeyUsage
 	}{
 		{"leaf default", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}},
-		{"CA default", []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}},
+		{"OCSP signing", []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}},
 		{"every supported usage", []x509.ExtKeyUsage{
 			x509.ExtKeyUsageAny,
 			x509.ExtKeyUsageServerAuth,
