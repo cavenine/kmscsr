@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -48,7 +49,8 @@ type Builder struct {
 	// for backward compatibility.
 	HashAlgo types.SigningAlgorithmSpec
 
-	// CA indicates if this is a CA certificate request
+	// CA indicates if this is a CA certificate request. Change it with SetCA,
+	// which also applies the matching KeyUsage and ExtKeyUsage defaults.
 	CA bool
 
 	// SubjectAltDomains contains DNS names for the SAN extension
@@ -189,8 +191,37 @@ func validateSubjectFields(subject *SubjectInfo) error {
 		{"postal code", subject.PostalCode},
 	}
 	for _, field := range fields {
+		if !utf8.ValidString(field.value) {
+			return fmt.Errorf("%s must be valid UTF-8", field.name)
+		}
 		if strings.ContainsFunc(field.value, unicode.IsControl) {
 			return fmt.Errorf("%s must not contain control characters", field.name)
+		}
+	}
+
+	return nil
+}
+
+// validateSubjectName applies the control character rule to the subject as it
+// will be encoded. The constructor already checks the SubjectInfo it was given,
+// but Subject is exported and may be changed afterwards, so the rule is enforced
+// again before signing. Round-tripping through DER decodes every string-typed
+// attribute, including ExtraNames supplied as raw ASN.1 values.
+func validateSubjectName(name *pkix.Name) error {
+	encoded, err := asn1.Marshal(name.ToRDNSequence())
+	if err != nil {
+		return fmt.Errorf("invalid subject: %w", err)
+	}
+	var rdns pkix.RDNSequence
+	if _, err = asn1.Unmarshal(encoded, &rdns); err != nil {
+		return fmt.Errorf("invalid subject: %w", err)
+	}
+	for _, rdn := range rdns {
+		for _, attribute := range rdn {
+			value, ok := attribute.Value.(string)
+			if ok && strings.ContainsFunc(value, unicode.IsControl) {
+				return fmt.Errorf("subject attribute %s must not contain control characters", attribute.Type)
+			}
 		}
 	}
 
@@ -270,7 +301,9 @@ func (b *Builder) loadPublicKey(ctx context.Context) error {
 	return nil
 }
 
-// SetCA sets whether this is a CA certificate request.
+// SetCA sets whether this is a CA certificate request, and resets KeyUsage and
+// ExtKeyUsage to the defaults for that kind of request. Customize either one
+// after calling SetCA, not before.
 func (b *Builder) SetCA(isCA bool) {
 	b.CA = isCA
 	if isCA {
@@ -289,6 +322,9 @@ func (b *Builder) BuildWithKMS(ctx context.Context) ([]byte, error) {
 	}
 	if b.Subject == nil {
 		return nil, errors.New("subject cannot be nil")
+	}
+	if err := validateSubjectName(b.Subject); err != nil {
+		return nil, err
 	}
 	if err := validateSubjectAltNames(b.SubjectAltDomains, b.SubjectAltIPs); err != nil {
 		return nil, err
@@ -435,6 +471,11 @@ func validateSubjectAltNames(domains []string, ips []net.IP) error {
 		if domain != strings.TrimSpace(domain) {
 			return fmt.Errorf("subject alternative DNS name %q has leading or trailing whitespace", domain)
 		}
+		// A NUL or line break is ASCII, so the check below would pass it, but
+		// verifiers that stop at the NUL would match a name the CA never vetted.
+		if strings.ContainsFunc(domain, unicode.IsControl) {
+			return fmt.Errorf("subject alternative DNS name %q must not contain control characters", domain)
+		}
 		// dNSName is an IA5String, so it cannot carry non-ASCII runes.
 		// Internationalized names must be supplied in their A-label form.
 		for _, char := range domain {
@@ -462,7 +503,7 @@ func PEMEncode(csrDER []byte) []byte {
 	})
 }
 
-// kmsSigner implements crypto.Signer interface using AWS KMS.
+// kmsSigner implements the [crypto.Signer] interface using AWS KMS.
 type kmsSigner struct {
 	ctx       context.Context
 	kmsClient KMSClient
@@ -521,12 +562,14 @@ func basicConstraintsExtension(isCA bool) (pkix.Extension, error) {
 	}, nil
 }
 
-// keyUsageExtension creates a PKIX extension for the given x509.KeyUsage.
+// keyUsageExtension creates a PKIX extension for the given [x509.KeyUsage].
 // The function encodes the key usage into an ASN.1 bit string and returns it as a critical extension.
 func keyUsageExtension(usage x509.KeyUsage) (pkix.Extension, error) {
 	const supportedKeyUsage = x509.KeyUsage(0x1ff)
 	if usage&^supportedKeyUsage != 0 {
-		return pkix.Extension{}, fmt.Errorf("unsupported key usage bits: %#x", usage&^supportedKeyUsage)
+		// Converted because x509.KeyUsage implements fmt.Stringer, which %x
+		// would otherwise hex-encode.
+		return pkix.Extension{}, fmt.Errorf("unsupported key usage bits: %#x", uint(usage&^supportedKeyUsage))
 	}
 	// RFC 5280 requires at least one bit to be set, and an all-zero usage would
 	// encode as a BIT STRING whose declared length contradicts its content.

@@ -13,7 +13,7 @@ import (
 )
 
 // Extension OIDs asserted by the parity tests. These are functions rather than
-// package variables because asn1.ObjectIdentifier is a slice and cannot be a
+// package variables because [asn1.ObjectIdentifier] is a slice and cannot be a
 // constant.
 func oidBasicConstraints() asn1.ObjectIdentifier { return asn1.ObjectIdentifier{2, 5, 29, 19} }
 func oidKeyUsage() asn1.ObjectIdentifier         { return asn1.ObjectIdentifier{2, 5, 29, 15} }
@@ -53,6 +53,8 @@ func decodeIsCA(t *testing.T, value []byte) bool {
 // default non-CA request: four extensions, with the criticality RFC 5280
 // prescribes for each.
 func TestParity_BuildBasic(t *testing.T) {
+	t.Parallel()
+
 	publicKeyDER, privateKey := generateMockECDSAPublicKeyOnCurve(t, elliptic.P256())
 	builder := newSigningBuilder(
 		t,
@@ -124,6 +126,8 @@ func TestParity_BuildBasic(t *testing.T) {
 // TestParity_CARequestBasicConstraints pins the CA variant: the reference marks
 // basic constraints critical only when cA is TRUE.
 func TestParity_CARequestBasicConstraints(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "ca.example.com"})
 	builder.SetCA(true)
 
@@ -148,6 +152,8 @@ func TestParity_CARequestBasicConstraints(t *testing.T) {
 // TestParity_SANCriticalWhenSubjectEmpty covers RFC 5280 section 4.2.1.6: with
 // an empty subject the SAN is the only identity, so it must be critical.
 func TestParity_SANCriticalWhenSubjectEmpty(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		subject  SubjectInfo
@@ -161,6 +167,8 @@ func TestParity_SANCriticalWhenSubjectEmpty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			builder := newRSASigningBuilder(t, &tt.subject)
 			builder.SubjectAltDomains = []string{"example.com"}
 
@@ -183,6 +191,8 @@ func TestParity_SANCriticalWhenSubjectEmpty(t *testing.T) {
 // TestParity_SANEncodesIPv4AsFourBytes guards the encoding choice that keeps
 // IPv4 addresses comparing equal after a round trip.
 func TestParity_SANEncodesIPv4AsFourBytes(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "example.com"})
 	builder.SubjectAltIPs = []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::1")}
 
@@ -209,6 +219,8 @@ func TestParity_SANEncodesIPv4AsFourBytes(t *testing.T) {
 // TestParity_RejectsNonASCIIDNSName keeps the IA5String rule enforced now that
 // the SAN extension is built here rather than by crypto/x509.
 func TestParity_RejectsNonASCIIDNSName(t *testing.T) {
+	t.Parallel()
+
 	builder := newRSASigningBuilder(t, &SubjectInfo{CommonName: "example.com"})
 	builder.SubjectAltDomains = []string{"exämple.com"}
 
