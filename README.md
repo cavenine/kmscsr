@@ -38,7 +38,7 @@ go build ./cmd/kmscsr
 
 - AWS SDK for Go v2 (`github.com/aws/aws-sdk-go-v2`)
 - Cobra CLI framework (`github.com/spf13/cobra`)
-- Go 1.27.1 or later
+- Go 1.27.4 or later
 
 ## Usage
 
