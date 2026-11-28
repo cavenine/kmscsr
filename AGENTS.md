@@ -27,7 +27,7 @@
   `git add --renormalize .`.
 
 ## Code Style
-- **Go Version**: Go 1.27.1+ (the `go` directive pins a patch release so builds
+- **Go Version**: Go 1.27.4+ (the `go` directive pins a patch release so builds
   always include standard-library security fixes for `crypto/x509`)
 - **Formatting**: Use `gofmt` standard formatting (enforced); tabs for indentation
 - **Naming**: Follow Go conventions (camelCase for private, PascalCase for exported)
