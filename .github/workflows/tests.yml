@@ -79,5 +79,10 @@ jobs:
       - name: Lint
         run: go tool golangci-lint run ./...
 
+      - name: Check error types
+        run: |
+          go install fillmore-labs.com/errortype@v0.0.12
+          errortype -recommended ./...
+
       - name: Vulnerability scan
         run: go tool govulncheck ./...
